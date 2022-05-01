@@ -240,6 +240,11 @@ func prepareConfig(timeout *int, iterationTimeout *int,
 		log.Fatal("Invalid result verbosity. Options: short, normal, long, trace")
 	}
 
+	// set defaults
+	GC.InputFilePath = "-"
+	GC.OutputFilePath = "-"
+	GC.AlexaFormat = false
+
 	GC.OutputGroups = append(GC.OutputGroups, GC.ResultVerbosity)
 	GC.OutputGroups = append(GC.OutputGroups, groups...)
 
@@ -275,12 +280,9 @@ func init() {
 	rootCmd.PersistentFlags().IntVar(&GC.GoMaxProcs, "go-processes", 0, "number of OS processes (GOMAXPROCS)")
 	rootCmd.PersistentFlags().StringVar(&GC.NamePrefix, "prefix", "", "name to be prepended to what's passed in (e.g., www.)")
 	rootCmd.PersistentFlags().StringVar(&GC.NameOverride, "override-name", "", "name overrides all passed in names")
-	rootCmd.PersistentFlags().BoolVar(&GC.AlexaFormat, "alexa", false, "is input file from Alexa Top Million download")
 	rootCmd.PersistentFlags().BoolVar(&GC.MetadataFormat, "metadata-passthrough", false, "if input records have the form 'name,METADATA', METADATA will be propagated to the output")
 	rootCmd.PersistentFlags().BoolVar(&GC.IterativeResolution, "iterative", false, "Perform own iteration instead of relying on recursive resolver")
 	rootCmd.PersistentFlags().BoolVar(&GC.LookupAllNameServers, "all-nameservers", false, "Perform the lookup via all the nameservers for the domain.")
-	rootCmd.PersistentFlags().StringVar(&GC.InputFilePath, "input-file", "-", "names to read")
-	rootCmd.PersistentFlags().StringVar(&GC.OutputFilePath, "output-file", "-", "where should JSON output be saved")
 	rootCmd.PersistentFlags().StringVar(&GC.MetadataFilePath, "metadata-file", "", "where should JSON metadata be saved")
 	rootCmd.PersistentFlags().StringVar(&GC.LogFilePath, "log-file", "", "where should JSON logs be saved")
 
