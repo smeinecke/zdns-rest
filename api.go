@@ -130,11 +130,11 @@ func runJob(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func startServer(ApiIp string, ApiPort int) {
+func startServer() {
 	r := mux.NewRouter().StrictSlash(true)
 	r.HandleFunc("/dns/{lookup}", runJob).Methods("POST")
 	r.HandleFunc("/info", info)
 	r.NotFoundHandler = http.HandlerFunc(notFound)
-	log.Info("Starting Server on ", ApiIP, ":", ApiPort)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf("%s:%v", ApiIP, ApiPort), r))
+	log.Info("Starting Server on ", GC.ApiIP, ":", GC.ApiPort)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf("%s:%v", GC.ApiIP, GC.ApiPort), r))
 }

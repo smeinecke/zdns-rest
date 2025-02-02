@@ -29,11 +29,12 @@ import (
 type GlobalConf struct {
 	zdns.GlobalConf
 
-	Flags *pflag.FlagSet
+	Flags   *pflag.FlagSet
+	ApiPort int
+	ApiIP   string
 }
 
-//TODO: these options may need to be set as flags or in GC, to standardize.
-var (
+type ArgumentsConf struct {
 	Servers_string   string
 	Localaddr_string string
 	Localif_string   string
@@ -42,13 +43,11 @@ var (
 	IterationTimeout int
 	Class_string     string
 	NanoSeconds      bool
-
-	ApiPort int
-	ApiIP   string
-)
+}
 
 var cfgFile string
 var GC GlobalConf
+var AC ArgumentsConf
 
 var rePort *regexp.Regexp
 var reV6 *regexp.Regexp
@@ -66,19 +65,12 @@ and parsing raw DNS packets.
 ZDNS also includes its own recursive resolution and a cache to further optimize performance.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		GC.Flags = cmd.Flags()
-		prepareConfig(&Timeout, &IterationTimeout,
-			&Class_string, &Servers_string,
-			&Config_file, &Localaddr_string,
-			&Localif_string, &NanoSeconds)
-		startServer(ApiIP, ApiPort)
+		prepareConfig()
+		startServer()
 	},
 }
 
-func prepareConfig(timeout *int, iterationTimeout *int,
-	class_string *string, servers_string *string,
-	config_file *string, localaddr_string *string,
-	localif_string *string, nanoSeconds *bool) {
-
+func prepareConfig() {
 	if GC.LogFilePath != "" {
 		f, err := os.OpenFile(GC.LogFilePath, os.O_WRONLY|os.O_CREATE, 0666)
 		if err != nil {
@@ -104,11 +96,11 @@ func prepareConfig(timeout *int, iterationTimeout *int,
 	}
 
 	// complete post facto global initialization based on command line arguments
-	GC.Timeout = time.Duration(time.Second * time.Duration(*timeout))
-	GC.IterationTimeout = time.Duration(time.Second * time.Duration(*iterationTimeout))
+	GC.Timeout = time.Duration(time.Second * time.Duration(AC.Timeout))
+	GC.IterationTimeout = time.Duration(time.Second * time.Duration(AC.IterationTimeout))
 
 	// class initialization
-	switch strings.ToUpper(*class_string) {
+	switch strings.ToUpper(AC.Class_string) {
 	case "INET", "IN":
 		GC.Class = dns.ClassINET
 	case "CSNET", "CS":
@@ -126,18 +118,18 @@ func prepareConfig(timeout *int, iterationTimeout *int,
 	}
 
 	if GC.LookupAllNameServers {
-		if *servers_string != "" {
+		if AC.Servers_string != "" {
 			log.Fatal("Name servers cannot be specified in --all-nameservers mode.")
 		}
 	}
 
-	if *servers_string == "" {
+	if AC.Servers_string == "" {
 		// if we're doing recursive resolution, figure out default OS name servers
 		// otherwise, use the set of 13 root name servers
 		if GC.IterativeResolution {
 			GC.NameServers = zdns.RootServers[:]
 		} else {
-			ns, err := zdns.GetDNSServers(*config_file)
+			ns, err := zdns.GetDNSServers(AC.Config_file)
 			if err != nil {
 				ns = GetDefaultResolvers()
 				log.Warn("Unable to parse resolvers file. Using ZDNS defaults: ", strings.Join(ns, ", "))
@@ -151,8 +143,8 @@ func prepareConfig(timeout *int, iterationTimeout *int,
 			log.Fatal("name servers cannot be specified on command line in --name-server-mode")
 		}
 		var ns []string
-		if (*servers_string)[0] == '@' {
-			filepath := (*servers_string)[1:]
+		if (AC.Servers_string)[0] == '@' {
+			filepath := (AC.Servers_string)[1:]
 			f, err := ioutil.ReadFile(filepath)
 			if err != nil {
 				log.Fatalf("Unable to read file (%s): %s", filepath, err.Error())
@@ -162,7 +154,7 @@ func prepareConfig(timeout *int, iterationTimeout *int,
 			}
 			ns = strings.Split(strings.Trim(string(f), "\n"), "\n")
 		} else {
-			ns = strings.Split(*servers_string, ",")
+			ns = strings.Split(AC.Servers_string, ",")
 		}
 		for i, s := range ns {
 			ns[i] = AddDefaultPortToDNSServerName(s)
@@ -171,8 +163,8 @@ func prepareConfig(timeout *int, iterationTimeout *int,
 		GC.NameServersSpecified = true
 	}
 
-	if *localaddr_string != "" {
-		for _, la := range strings.Split(*localaddr_string, ",") {
+	if AC.Localaddr_string != "" {
+		for _, la := range strings.Split(AC.Localaddr_string, ",") {
 			ip := net.ParseIP(la)
 			if ip != nil {
 				GC.LocalAddrs = append(GC.LocalAddrs, ip)
@@ -180,15 +172,15 @@ func prepareConfig(timeout *int, iterationTimeout *int,
 				log.Fatal("Invalid argument for --local-addr (", la, "). Must be a comma-separated list of valid IP addresses.")
 			}
 		}
-		log.Info("using local address: ", localaddr_string)
+		log.Info("using local address: ", AC.Localaddr_string)
 		GC.LocalAddrSpecified = true
 	}
 
-	if *localif_string != "" {
+	if AC.Localif_string != "" {
 		if GC.LocalAddrSpecified {
 			log.Fatal("Both --local-addr and --local-interface specified.")
 		} else {
-			li, err := net.InterfaceByName(*localif_string)
+			li, err := net.InterfaceByName(AC.Localif_string)
 			if err != nil {
 				log.Fatal("Invalid local interface specified: ", err)
 			}
@@ -200,7 +192,7 @@ func prepareConfig(timeout *int, iterationTimeout *int,
 				GC.LocalAddrs = append(GC.LocalAddrs, la.(*net.IPNet).IP)
 				GC.LocalAddrSpecified = true
 			}
-			log.Info("using local interface: ", localif_string)
+			log.Info("using local interface: ", AC.Localif_string)
 		}
 	}
 	if !GC.LocalAddrSpecified {
@@ -211,7 +203,7 @@ func prepareConfig(timeout *int, iterationTimeout *int,
 			GC.LocalAddrs = append(GC.LocalAddrs, conn.LocalAddr().(*net.UDPAddr).IP)
 		}
 	}
-	if *nanoSeconds {
+	if AC.NanoSeconds {
 		GC.TimeFormat = time.RFC3339Nano
 	} else {
 		GC.TimeFormat = time.RFC3339
@@ -289,8 +281,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&GC.ResultVerbosity, "result-verbosity", "normal", "Sets verbosity of each output record. Options: short, normal, long, trace")
 	rootCmd.PersistentFlags().StringVar(&GC.IncludeInOutput, "include-fields", "", "Comma separated list of fields to additionally output beyond result verbosity. Options: class, protocol, ttl, resolver, flags")
 
-	rootCmd.PersistentFlags().IntVar(&ApiPort, "bind-port", 8080, "port to bind API to")
-	rootCmd.PersistentFlags().StringVar(&ApiIP, "bind-ip", "", "ip to bind API to")
+	rootCmd.PersistentFlags().IntVar(&GC.ApiPort, "bind-port", 8080, "port to bind API to")
+	rootCmd.PersistentFlags().StringVar(&GC.ApiIP, "bind-ip", "", "ip to bind API to")
 
 	rootCmd.PersistentFlags().IntVar(&GC.Verbosity, "verbosity", 4, "log verbosity: 1 (lowest)--5 (highest)")
 	rootCmd.PersistentFlags().IntVar(&GC.Retries, "retries", 1, "how many times should zdns retry query if timeout or temporary failure")
@@ -301,14 +293,14 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&GC.RecycleSockets, "recycle-sockets", true, "Create long-lived unbound UDP socket for each thread at launch and reuse for all (UDP) queries")
 	rootCmd.PersistentFlags().BoolVar(&GC.NameServerMode, "name-server-mode", false, "Treats input as nameservers to query with a static query rather than queries to send to a static name server")
 
-	rootCmd.PersistentFlags().StringVar(&Servers_string, "name-servers", "", "List of DNS servers to use. Can be passed as comma-delimited string or via @/path/to/file. If no port is specified, defaults to 53.")
-	rootCmd.PersistentFlags().StringVar(&Localaddr_string, "local-addr", "", "comma-delimited list of local addresses to use")
-	rootCmd.PersistentFlags().StringVar(&Localif_string, "local-interface", "", "local interface to use")
-	rootCmd.PersistentFlags().StringVar(&Config_file, "conf-file", "/etc/resolv.conf", "config file for DNS servers")
-	rootCmd.PersistentFlags().IntVar(&Timeout, "timeout", 15, "timeout for resolving an individual name")
-	rootCmd.PersistentFlags().IntVar(&IterationTimeout, "iteration-timeout", 4, "timeout for resolving a single iteration in an iterative query")
-	rootCmd.PersistentFlags().StringVar(&Class_string, "class", "INET", "DNS class to query. Options: INET, CSNET, CHAOS, HESIOD, NONE, ANY. Default: INET.")
-	rootCmd.PersistentFlags().BoolVar(&NanoSeconds, "nanoseconds", false, "Use nanosecond resolution timestamps")
+	rootCmd.PersistentFlags().StringVar(&AC.Servers_string, "name-servers", "", "List of DNS servers to use. Can be passed as comma-delimited string or via @/path/to/file. If no port is specified, defaults to 53.")
+	rootCmd.PersistentFlags().StringVar(&AC.Localaddr_string, "local-addr", "", "comma-delimited list of local addresses to use")
+	rootCmd.PersistentFlags().StringVar(&AC.Localif_string, "local-interface", "", "local interface to use")
+	rootCmd.PersistentFlags().StringVar(&AC.Config_file, "conf-file", "/etc/resolv.conf", "config file for DNS servers")
+	rootCmd.PersistentFlags().IntVar(&AC.Timeout, "timeout", 15, "timeout for resolving an individual name")
+	rootCmd.PersistentFlags().IntVar(&AC.IterationTimeout, "iteration-timeout", 4, "timeout for resolving a single iteration in an iterative query")
+	rootCmd.PersistentFlags().StringVar(&AC.Class_string, "class", "INET", "DNS class to query. Options: INET, CSNET, CHAOS, HESIOD, NONE, ANY. Default: INET.")
+	rootCmd.PersistentFlags().BoolVar(&AC.NanoSeconds, "nanoseconds", false, "Use nanosecond resolution timestamps")
 
 	rootCmd.PersistentFlags().Bool("ipv4-lookup", false, "Perform an IPv4 Lookup in modules")
 	rootCmd.PersistentFlags().Bool("ipv6-lookup", false, "Perform an IPv6 Lookup in modules")
