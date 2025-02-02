@@ -31,7 +31,7 @@ jobs:
           goos: ${{ matrix.goos }}
           goarch: ${{ matrix.goarch }}
           goversion: "https://dl.google.com/go/go1.18.linux-amd64.tar.gz"
-          project_path: "./cmd/zdns-rest"
+          project_path: "."
           binary_name: "zdns-rest"
           extra_files: LICENSE README.md
           upload: ${{ github.event_name == 'release' }}
