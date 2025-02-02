@@ -2,7 +2,7 @@ name: 'build-release'
 
 on:
   release:
-    types: [published, prereleased, created]
+    types: [created]
 
   pull_request:
     types: [opened, synchronize, reopened]
