@@ -253,6 +253,8 @@ func main() {
 	}
 }
 
+// init sets up the default logging format and sets up the viper configuration reader.
+// It also sets up the root command and its flags.
 func init() {
 	rePort = regexp.MustCompile(":\\d+$")      // string ends with potential port number
 	reV6 = regexp.MustCompile("^([0-9a-f]*:)") // string starts like valid IPv6 address
@@ -360,10 +362,15 @@ func GetDefaultResolvers() []string {
 	return []string{"8.8.8.8:53", "8.8.4.4:53", "1.1.1.1:53", "1.0.0.1:53"}
 }
 
+// AddDefaultPortToDNSServerName adds a default port of 53 to the given DNS server name.
+// If the DNS server name is an IPv6 address, it will be enclosed in square brackets.
 func AddDefaultPortToDNSServerName(s string) string {
+	// If the given string does not end with a port number, add 53
 	if !rePort.MatchString(s) {
 		return s + ":53"
-	} else if reV6.MatchString(s) {
+	}
+	// If the given string is an IPv6 address, enclose it in square brackets
+	if reV6.MatchString(s) {
 		return "[" + s + "]:53"
 	}
 	return s

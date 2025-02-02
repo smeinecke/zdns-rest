@@ -19,12 +19,18 @@ type StreamOutputHandler struct {
 	writer http.ResponseWriter
 }
 
+// NewStreamOutputHandler returns a new StreamOutputHandler that will write results to the given http.ResponseWriter.
 func NewStreamOutputHandler(w http.ResponseWriter) *StreamOutputHandler {
 	return &StreamOutputHandler{
 		writer: w,
 	}
 }
 
+// WriteResults takes a channel of strings and writes them to the embedded http.ResponseWriter.
+// The WaitGroup is used to signal when the write operation is complete. The function will block until the
+// channel is closed. If the http.ResponseWriter implements the http.Flusher interface, WriteResults will
+// call Flush() after writing all the results in order to ensure that the writes are sent to the client as
+// soon as possible.
 func (h *StreamOutputHandler) WriteResults(results <-chan string, wg *sync.WaitGroup) error {
 	defer (*wg).Done()
 	for n := range results {
@@ -38,8 +44,8 @@ func (h *StreamOutputHandler) WriteResults(results <-chan string, wg *sync.WaitG
 }
 
 type DNSRequests struct {
-	Module   string   `json:"module"`
-	Requests []string `json:"requests"`
+	Module  string   `json:"module"`
+	Queries []string `json:"queries"`
 }
 
 type APIResultType struct {
@@ -47,6 +53,9 @@ type APIResultType struct {
 	Message string `json:"message"`
 }
 
+// APIResult writes a JSON response with the given code and message to the
+// given http.ResponseWriter. It will also set the HTTP status code to 400 if
+// the code is 2000 or higher.
 func APIResult(w http.ResponseWriter, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	if code >= 2000 {
@@ -57,15 +66,22 @@ func APIResult(w http.ResponseWriter, code int, message string) {
 	})
 }
 
-func info(w http.ResponseWriter, r *http.Request) {
-	APIResult(w, 1000, "Call is ok")
+// pingRequest is the handler for the GET /ping route. It returns a JSON result
+// with code 1000 and the message "Command completed successfully".
+func pingRequest(w http.ResponseWriter, r *http.Request) {
+	APIResult(w, 1000, "Command completed successfully")
 }
 
+// notFound is the handler for any route that doesn't match any of the defined routes.
+// It returns a JSON result with code 2000 and the message "Unknown command".
 func notFound(w http.ResponseWriter, r *http.Request) {
 	APIResult(w, 2000, "Unknown command")
 }
 
-func runJob(w http.ResponseWriter, r *http.Request) {
+// runModule is the main handler function for the API server. It handles both form encoded
+// and JSON encoded requests. It extracts the lookup type from the URL or the request
+// body, and then runs the lookup using the zdns library.
+func runModule(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	w.Header().Set("Content-Type", "application/json")
 	var dr DNSRequests
@@ -89,12 +105,12 @@ func runJob(w http.ResponseWriter, r *http.Request) {
 			dr.Module = "A"
 		}
 
-		if len(dr.Requests) < 1 {
-			APIResult(w, 2005, "Requests array empty.")
+		if len(dr.Queries) < 1 {
+			APIResult(w, 2005, "Queries array empty.")
 			return
 		}
 
-		t := strings.NewReader(strings.Join(dr.Requests, "\n"))
+		t := strings.NewReader(strings.Join(dr.Queries, "\n"))
 		gc.InputHandler = iohandlers.NewStreamInputHandler(t)
 	} else {
 		if val, ok := vars["lookup"]; ok {
@@ -130,10 +146,16 @@ func runJob(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// startServer sets up the gorilla/mux router and starts the server on the configured address and port.
+// It will serve the following endpoints:
+// - POST /job/{lookup}: runs a job for the given lookup type
+// - GET /ping: returns a simple "Call is ok" message
+// - Anything else: returns a 404 JSON response
 func startServer() {
 	r := mux.NewRouter().StrictSlash(true)
-	r.HandleFunc("/dns/{lookup}", runJob).Methods("POST")
-	r.HandleFunc("/info", info)
+	r.HandleFunc("/job/{lookup}", runModule).Methods("POST")
+	r.HandleFunc("/job", runModule).Methods("POST")
+	r.HandleFunc("/ping", pingRequest)
 	r.NotFoundHandler = http.HandlerFunc(notFound)
 	log.Info("Starting Server on ", GC.ApiIP, ":", GC.ApiPort)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf("%s:%v", GC.ApiIP, GC.ApiPort), r))
