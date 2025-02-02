@@ -10,33 +10,28 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  releases-matrix:
+    name: Release Go Binary
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # build and publish in parallel: linux/386, linux/amd64, linux/arm64, windows/386, windows/amd64, darwin/amd64, darwin/arm64
+        goos: [linux, windows, darwin]
+        goarch: ["386", amd64, arm64]
+        exclude:
+          - goarch: "386"
+            goos: darwin
+          - goarch: arm64
+            goos: windows
     steps:
-      # Checkout the repo
-      - name: 'Checkout'
-        uses: actions/checkout@v3
-      # Build Go binaries
-      - name: 'Build Go binaries'
-        uses: cloudposse/actions/go/build@0.33.0
-        env:
-          GO111MODULE: on
-          # Architectures to build for
-          GOX_OSARCH: >-
-            linux/arm
-            linux/386
-            linux/amd64
-          OUTPUT_PATH: ${{ github.workspace }}/release/${{ github.event.repository.name }}_
-      # Upload artifacts for this build
-      - name: 'Upload artifacts'
-        uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: wangyoucao577/go-release-action@v1
         with:
-          name: ${{ github.event.repository.name }}
-          path: ${{ github.workspace }}/release/*
-      # Attach Go binaries to GitHub Release
-      - name: 'Attach artifacts to GitHub Release'
-        if: ${{ github.event_name == 'release' }}
-        uses: cloudposse/actions/github/release-assets@0.33.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_PATH: ${{ github.workspace }}/release/${{ github.event.repository.name }}_*
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          goos: ${{ matrix.goos }}
+          goarch: ${{ matrix.goarch }}
+          goversion: "https://dl.google.com/go/go1.18.linux-amd64.tar.gz"
+          project_path: "./cmd/zdns-rest"
+          binary_name: "zdns-rest"
+          extra_files: LICENSE README.md
+          upload: ${{ github.event_name == 'release' }}
