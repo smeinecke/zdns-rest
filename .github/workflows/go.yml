@@ -1,8 +1,8 @@
-name: 'go'
+name: 'build-release'
 
 on:
   release:
-    types: [published, draft]
+    types: [published, prereleased, created]
 
   pull_request:
     types: [opened, synchronize, reopened]
