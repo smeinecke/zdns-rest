@@ -36,12 +36,15 @@ go build -o zdns-rest cmd/main.go
 
 ## Example
 
-```
+```bash
 $ ./zdns-rest --iterative
-$ curl -X POST -H "Content-Type: application/json" -d '{"module": "MXLOOKUP", "queries": ["google.com", "bing.com"]}' http://localhost:8080/job
+$ curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"module": "MXLOOKUP", "queries": ["google.com", "bing.com"]}' \
+  http://localhost:8080/job
 ```
 
-```
+```json
 {
   "data": {
     "exchanges": [
