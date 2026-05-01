@@ -1,0 +1,12 @@
+FROM alpine:3.19
+
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /root/
+
+COPY docker-dist/zdns-rest ./zdns-rest
+
+EXPOSE 8080
+
+ENTRYPOINT ["./zdns-rest"]
+CMD ["--bind-port", "8080"]
