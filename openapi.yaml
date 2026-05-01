@@ -1,0 +1,259 @@
+openapi: 3.0.3
+info:
+  title: zdns-rest API
+  description: |
+    A REST API wrapper for zmap/zdns, providing HTTP endpoints for high-speed DNS lookups.
+
+    ## Rate Limiting
+    Rate limiting is enabled by default with 100 requests per 60-second window per IP.
+    When rate limited, the API returns HTTP 429 with the following headers:
+    - `X-RateLimit-Limit`: Maximum requests allowed in the window
+    - `X-RateLimit-Window`: Duration of the rate limit window in seconds
+
+    ## Error Codes
+    - `1000`: Success
+    - `2000`: Unknown command/route not found
+    - `2001`: Failed to decode/read request
+    - `2005`: Invalid module, empty queries, or too many queries
+    - `2400`: Factory initialization or lookup error
+    - `3000`: Rate limit exceeded
+  version: 1.0.0
+  contact:
+    name: zdns-rest
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+paths:
+  /ping:
+    get:
+      summary: Health check
+      description: Returns a simple health check response
+      operationId: ping
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+              example:
+                code: 1000
+                message: Command completed successfully
+
+  /job:
+    post:
+      summary: Run DNS lookup job
+      description: |
+        Performs DNS lookups for the provided domain names using the specified module.
+        Results are streamed as newline-delimited JSON (NDJSON).
+      operationId: runJob
+      tags:
+        - DNS
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DNSRequest'
+            example:
+              module: A
+              queries:
+                - example.com
+                - example.org
+      responses:
+        '200':
+          description: Successful DNS lookup results (NDJSON stream)
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: '#/components/schemas/DNSResult'
+        '400':
+          description: Bad request - invalid JSON, empty queries, or too many queries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '413':
+          description: Request entity too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+              example:
+                code: 3000
+                message: Rate limit exceeded. Please try again later.
+          headers:
+            X-RateLimit-Limit:
+              schema:
+                type: integer
+              description: Maximum requests allowed per window
+            X-RateLimit-Window:
+              schema:
+                type: string
+              description: Duration of the rate limit window
+
+  /job/{lookup}:
+    post:
+      summary: Run DNS lookup job with module in URL
+      description: |
+        Performs DNS lookups using the module specified in the URL path.
+        Accepts plain text input with one domain per line.
+        Results are streamed as newline-delimited JSON (NDJSON).
+      operationId: runJobWithModule
+      tags:
+        - DNS
+      parameters:
+        - name: lookup
+          in: path
+          required: true
+          description: DNS lookup module to use
+          schema:
+            type: string
+            enum:
+              - A
+              - AAAA
+              - MX
+              - MXLOOKUP
+              - NS
+              - NSLOOKUP
+              - SOA
+              - TXT
+              - SPF
+              - DMARC
+              - BINDVERSION
+              - ALOOKUP
+              - AXFR
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+            example: |
+              example.com
+              example.org
+          application/x-www-form-urlencoded:
+            schema:
+              type: string
+            example: example.com
+      responses:
+        '200':
+          description: Successful DNS lookup results (NDJSON stream)
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: '#/components/schemas/DNSResult'
+        '400':
+          description: Bad request - invalid module or other error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+
+components:
+  schemas:
+    DNSRequest:
+      type: object
+      required:
+        - queries
+      properties:
+        module:
+          type: string
+          description: DNS lookup module to use
+          default: A
+          enum:
+            - A
+            - AAAA
+            - MX
+            - MXLOOKUP
+            - NS
+            - NSLOOKUP
+            - SOA
+            - TXT
+            - SPF
+            - DMARC
+            - BINDVERSION
+            - ALOOKUP
+            - AXFR
+        queries:
+          type: array
+          items:
+            type: string
+            pattern: '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.?$'
+            maxLength: 253
+          description: Domain names to lookup (max 1000)
+          maxItems: 1000
+
+    DNSResult:
+      type: object
+      properties:
+        name:
+          type: string
+          description: The queried domain name
+        status:
+          type: string
+          description: DNS response status
+          enum:
+            - NOERROR
+            - FORMERR
+            - SERVFAIL
+            - NXDOMAIN
+            - NOTIMP
+            - REFUSED
+            - TIMEOUT
+        timestamp:
+          type: string
+          format: date-time
+          description: Timestamp of the lookup
+        data:
+          type: object
+          description: DNS response data (module-specific)
+
+    Result:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: integer
+          description: Result code
+        message:
+          type: string
+          description: Human-readable message
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+          example:
+            code: 2001
+            message: Failed to decode request
+
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+          example:
+            code: 3000
+            message: Rate limit exceeded. Please try again later.

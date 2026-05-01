@@ -1,12 +1,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"net"
 	"net/http"
+	_ "net/http/pprof"
+	"os"
+	"os/signal"
+	"regexp"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/jinzhu/copier"
@@ -34,13 +44,105 @@ func NewStreamOutputHandler(w http.ResponseWriter) *StreamOutputHandler {
 func (h *StreamOutputHandler) WriteResults(results <-chan string, wg *sync.WaitGroup) error {
 	defer (*wg).Done()
 	for n := range results {
-		h.writer.Write([]byte(n + "\n"))
+		if _, err := h.writer.Write([]byte(n + "\n")); err != nil {
+			return err
+		}
 	}
 
 	if f, ok := h.writer.(http.Flusher); ok {
 		f.Flush()
 	}
 	return nil
+}
+
+// domainRegex validates RFC 1123 hostnames
+var domainRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.?$`)
+
+// RateLimiter implements a simple token bucket rate limiter per IP
+type RateLimiter struct {
+	mu       sync.RWMutex
+	requests map[string][]time.Time
+	limit    int
+	window   time.Duration
+}
+
+// NewRateLimiter creates a new rate limiter with the given limit and window
+func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
+	return &RateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    limit,
+		window:   window,
+	}
+}
+
+// Allow checks if a request from the given IP is allowed
+func (rl *RateLimiter) Allow(ip string) bool {
+	if rl == nil || rl.limit <= 0 {
+		return true
+	}
+
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-rl.window)
+
+	// Clean old requests and count recent ones
+	var recent []time.Time
+	for _, t := range rl.requests[ip] {
+		if t.After(cutoff) {
+			recent = append(recent, t)
+		}
+	}
+
+	if len(recent) >= rl.limit {
+		rl.requests[ip] = recent
+		return false
+	}
+
+	recent = append(recent, now)
+	rl.requests[ip] = recent
+	return true
+}
+
+// RateLimitMiddleware wraps an HTTP handler with rate limiting
+func RateLimitMiddleware(next http.Handler, limiter *RateLimiter) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
+
+		if !limiter.Allow(ip) {
+			rateLimitHits.Inc()
+			w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", limiter.limit))
+			w.Header().Set("X-RateLimit-Window", fmt.Sprintf("%v", limiter.window))
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(APIResultType{
+				Code:    3000,
+				Message: "Rate limit exceeded. Please try again later.",
+			})
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// LimitBodySize wraps a handler to limit request body size
+func LimitBodySize(next http.Handler, maxSize int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// validateDomain checks if a domain name is valid
+func validateDomain(domain string) bool {
+	if len(domain) == 0 || len(domain) > 253 {
+		return false
+	}
+	return domainRegex.MatchString(domain)
 }
 
 type DNSRequests struct {
@@ -72,32 +174,109 @@ func pingRequest(w http.ResponseWriter, r *http.Request) {
 	APIResult(w, 1000, "Command completed successfully")
 }
 
+// BuildInfo holds information about the build
+type BuildInfo struct {
+	Version   string `json:"version"`
+	GoVersion string `json:"go_version"`
+	Commit    string `json:"commit"`
+	Date      string `json:"build_date"`
+}
+
+var buildInfo = BuildInfo{
+	Version:   "dev",
+	GoVersion: runtime.Version(),
+	Commit:    "unknown",
+	Date:      "unknown",
+}
+
+func init() {
+	// Try to read build info from Go binary
+	if info, ok := debug.ReadBuildInfo(); ok {
+		buildInfo.GoVersion = info.GoVersion
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				buildInfo.Commit = setting.Value
+			case "vcs.time":
+				buildInfo.Date = setting.Value
+			}
+		}
+	}
+}
+
+// healthResponse represents the health check response
+type healthResponse struct {
+	Code      int       `json:"code"`
+	Message   string    `json:"message"`
+	Status    string    `json:"status"`
+	BuildInfo BuildInfo `json:"build_info"`
+}
+
+// healthRequest is the handler for the GET /health route
+func healthRequest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(healthResponse{
+		Code:      1000,
+		Message:   "Healthy",
+		Status:    "up",
+		BuildInfo: buildInfo,
+	})
+}
+
+// readyResponse represents the readiness check response
+type readyResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Ready   bool   `json:"ready"`
+}
+
+// readyRequest is the handler for the GET /ready route
+func readyRequest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ready := true
+	json.NewEncoder(w).Encode(readyResponse{
+		Code:    1000,
+		Message: "Ready",
+		Ready:   ready,
+	})
+}
+
 // notFound is the handler for any route that doesn't match any of the defined routes.
 // It returns a JSON result with code 2000 and the message "Unknown command".
 func notFound(w http.ResponseWriter, r *http.Request) {
 	APIResult(w, 2000, "Unknown command")
 }
 
+// circuitBreaker is the global circuit breaker instance for DNS lookups
+var circuitBreaker *CircuitBreaker
+
 // runModule is the main handler function for the API server. It handles both form encoded
 // and JSON encoded requests. It extracts the lookup type from the URL or the request
 // body, and then runs the lookup using the zdns library.
 func runModule(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/x-ndjson")
 	var dr DNSRequests
 	var gc zdns.GlobalConf
-	copier.Copy(&gc, &GC)
+	if err := copier.Copy(&gc, &GC); err != nil {
+		ErrorResponse(w, ErrCopyConfig, err.Error())
+		return
+	}
 
 	// setup i/o
 	gc.OutputHandler = NewStreamOutputHandler(w)
 
 	req_content_type := r.Header.Get("Content-Type")
 	if req_content_type == "application/json" {
-		reqBody, _ := ioutil.ReadAll(r.Body)
-
-		err := json.Unmarshal(reqBody, &dr)
+		reqBody, err := io.ReadAll(r.Body)
 		if err != nil {
-			APIResult(w, 2001, "Failed to decode request: "+err.Error())
+			ErrorResponse(w, ErrReadRequest, err.Error())
+			return
+		}
+
+		err = json.Unmarshal(reqBody, &dr)
+		if err != nil {
+			ErrorResponse(w, ErrDecodeRequest, err.Error())
 			return
 		}
 
@@ -106,8 +285,21 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if len(dr.Queries) < 1 {
-			APIResult(w, 2005, "Queries array empty.")
+			ErrorResponse(w, ErrEmptyQueries, "")
 			return
+		}
+
+		if len(dr.Queries) > GC.MaxQueriesPerReq {
+			ErrorResponse(w, ErrTooManyQueries, fmt.Sprintf("Maximum allowed: %d", GC.MaxQueriesPerReq))
+			return
+		}
+
+		// Validate domain names
+		for _, q := range dr.Queries {
+			if !validateDomain(q) {
+				ErrorResponse(w, ErrInvalidDomain, q)
+				return
+			}
 		}
 
 		t := strings.NewReader(strings.Join(dr.Queries, "\n"))
@@ -125,38 +317,162 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 	gc.Module = strings.ToUpper(dr.Module)
 	factory := zdns.GetLookup(gc.Module)
 	if factory == nil {
-		APIResult(w, 2005, "Invalid lookup module specified.")
+		ErrorResponse(w, ErrInvalidModule, gc.Module)
+		return
+	}
+
+	// Check circuit breaker
+	if GC.CircuitBreakerEnabled && !circuitBreaker.CanExecute() {
+		ErrorResponse(w, ErrCircuitBreakerOpen, "")
 		return
 	}
 	factory.SetFlags(GC.Flags)
 
 	// allow the factory to initialize itself
 	if err := factory.Initialize(&gc); err != nil {
-		APIResult(w, 2400, "Factory was unable to initialize: "+err.Error())
+		if GC.CircuitBreakerEnabled {
+			circuitBreaker.RecordFailure()
+		}
+		ErrorResponse(w, ErrFactoryInit, err.Error())
+		return
 	}
 
 	// run it.
 	if err := zdns.DoLookups(factory, &gc); err != nil {
-		APIResult(w, 2400, "Unable to run lookups:"+err.Error())
+		if GC.CircuitBreakerEnabled {
+			circuitBreaker.RecordFailure()
+		}
+		ErrorResponse(w, ErrRunLookups, err.Error())
+		return
+	}
+
+	// Record success for circuit breaker
+	if GC.CircuitBreakerEnabled {
+		circuitBreaker.RecordSuccess()
 	}
 
 	// allow the factory to finalize itself
 	if err := factory.Finalize(); err != nil {
-		APIResult(w, 2400, "Factory was unable to finalize:"+err.Error())
+		ErrorResponse(w, ErrFactoryFinalize, err.Error())
+		return
 	}
 }
 
 // startServer sets up the gorilla/mux router and starts the server on the configured address and port.
 // It will serve the following endpoints:
 // - POST /job/{lookup}: runs a job for the given lookup type
-// - GET /ping: returns a simple "Call is ok" message
+// - POST /job: runs a job with JSON body
+// - GET /ping: health check
+// - GET /health: detailed health check with build info
+// - GET /ready: readiness probe
+// - GET /metrics: Prometheus metrics
 // - Anything else: returns a 404 JSON response
 func startServer() {
+	// Initialize circuit breaker if enabled
+	if GC.CircuitBreakerEnabled {
+		circuitBreaker = NewCircuitBreaker(GC.CircuitBreakerFailures, time.Duration(GC.CircuitBreakerTimeout)*time.Second)
+		log.Infof("Circuit breaker enabled: threshold=%d, timeout=%ds", GC.CircuitBreakerFailures, GC.CircuitBreakerTimeout)
+	}
+
+	// Setup routes
 	r := mux.NewRouter().StrictSlash(true)
 	r.HandleFunc("/job/{lookup}", runModule).Methods("POST")
 	r.HandleFunc("/job", runModule).Methods("POST")
 	r.HandleFunc("/ping", pingRequest)
+	r.HandleFunc("/health", healthRequest)
+	r.HandleFunc("/ready", readyRequest)
+	r.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		MetricsHandler().ServeHTTP(w, r)
+	})
 	r.NotFoundHandler = http.HandlerFunc(notFound)
-	log.Info("Starting Server on ", GC.ApiIP, ":", GC.ApiPort)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf("%s:%v", GC.ApiIP, GC.ApiPort), r))
+
+	// Setup pprof routes on a separate port if enabled
+	if GC.EnablePprof {
+		go func() {
+			pprofAddr := net.JoinHostPort(GC.ApiIP, fmt.Sprintf("%d", GC.PprofPort))
+			log.Info("Starting pprof server on ", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				log.Error("pprof server error: ", err)
+			}
+		}()
+	}
+
+	// Build middleware chain
+	var middlewares []Middleware
+
+	// CORS first (outermost)
+	corsConfig := CORSConfigFromFlags(GC.CORSOrigins, GC.CORSMethods, GC.CORSHeaders)
+	middlewares = append(middlewares, func(next http.Handler) http.Handler {
+		return CORSMiddleware(next, corsConfig)
+	})
+
+	// Metrics
+	middlewares = append(middlewares, MetricsMiddleware)
+
+	// Logging
+	middlewares = append(middlewares, LoggingMiddleware)
+
+	// Authentication
+	middlewares = append(middlewares, func(next http.Handler) http.Handler {
+		return AuthMiddleware(next, GC.APIKey)
+	})
+
+	// Rate limiting
+	if GC.RateLimitEnabled {
+		limiter := NewRateLimiter(GC.RateLimitRequests, time.Duration(GC.RateLimitWindow)*time.Second)
+		middlewares = append(middlewares, func(next http.Handler) http.Handler {
+			return RateLimitMiddleware(next, limiter)
+		})
+		log.Infof("Rate limiting enabled: %d requests per %d seconds per IP", GC.RateLimitRequests, GC.RateLimitWindow)
+	}
+
+	// Body size limit
+	if GC.MaxRequestBodySize > 0 {
+		middlewares = append(middlewares, func(next http.Handler) http.Handler {
+			return LimitBodySize(next, GC.MaxRequestBodySize)
+		})
+	}
+
+	// Recovery (innermost)
+	middlewares = append(middlewares, RecoverMiddleware)
+
+	// Apply middleware chain
+	handler := ChainMiddleware(r, middlewares...)
+
+	addr := net.JoinHostPort(GC.ApiIP, fmt.Sprintf("%d", GC.ApiPort))
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      handler,
+		ReadTimeout:  time.Duration(GC.RequestTimeout) * time.Second,
+		WriteTimeout: time.Duration(GC.RequestTimeout) * time.Second,
+	}
+
+	// Start server with or without TLS
+	go func() {
+		if GC.TLSEnabled {
+			log.Info("Starting HTTPS Server on ", addr)
+			if err := srv.ListenAndServeTLS(GC.TLSCertFile, GC.TLSKeyFile); err != nil && err != http.ErrServerClosed {
+				log.Fatal("Server listen error: ", err)
+			}
+		} else {
+			log.Info("Starting HTTP Server on ", addr)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatal("Server listen error: ", err)
+			}
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shut down the server
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Info("Shutting down server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server forced to shutdown: ", err)
+	}
+	log.Info("Server exited")
 }

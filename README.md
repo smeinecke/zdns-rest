@@ -1,87 +1,116 @@
 # zdns-rest
 
-A simple REST API for zdns. See [zmap/zdns](https://github.com/zmap/zdns) for more information.
-
+A REST API wrapper for [zmap/zdns](https://github.com/zmap/zdns), providing HTTP endpoints for high-speed DNS lookups.
 
 ## Build
 
-go build -o zdns-rest cmd/main.go
+```bash
+go build -o zdns-rest .
+```
 
 ## Run
 
+```bash
 ./zdns-rest --bind-ip 127.0.0.1 --bind-port 8080
+```
 
-## API
+### Configuration
 
-### POST /job/{lookup}
+All flags can be provided via command line, environment variables, or a config file (`~/.zdns.yaml`).
 
-- `lookup`: string, name of the lookup module to use (e.g. MX, A, AAAA, etc.) - see [zmap/zdns](https://github.com/zmap/zdns?tab=readme-ov-file#raw-dns-modules) for more information, optional (default: A)
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--bind-ip` | IP to bind API to | `` (all interfaces) |
+| `--bind-port` | Port to bind API to | `8080` |
+| `--iterative` | Perform own iteration instead of using recursive resolver | `false` |
+| `--name-servers` | Comma-separated list or `@/path/to/file` | System default |
+| `--timeout` | Timeout for resolving a name (seconds) | `15` |
+| `--threads` | Number of lightweight go threads | `1000` |
+| `--verbosity` | Log verbosity (1-5) | `4` |
+| `--tcp-only` | Only perform lookups over TCP | `false` |
+| `--udp-only` | Only perform lookups over UDP | `false` |
+| `--class` | DNS class (INET, CSNET, CHAOS, HESIOD, NONE, ANY) | `INET` |
 
-- Body:
-  - `queries`: array of strings, names to lookup
-  - `module`: string, name of the lookup module to use (e.g. MX, A, AAAA, etc.) (optional, default: A)
+Environment variables use `ZDNS_` prefix with uppercase and underscores, e.g. `ZDNS_BIND_PORT=9090`.
 
-- Response: JSON response, delimited by newlines - see [zmap/zdns](https://github.com/zmap/zdns?tab=readme-ov-file#raw-dns-modules)
-  - `data`: array of DNS records
-  - `name`: string, name of the lookup
-  - `status`: string, status of the lookup
-  - `timestamp`: string, timestamp of the lookup
+## Features
 
-### GET /ping
+- **REST API** for high-speed DNS lookups
+- **Prometheus metrics** (`/metrics`)
+- **Rate limiting** per IP address
+- **API key authentication** (optional)
+- **TLS/HTTPS** support
+- **CORS** support for browser clients
+- **Circuit breaker** for DNS failure protection
+- **Structured logging** with request IDs
+- **Health/readiness probes** (`/health`, `/ready`)
+- **pprof profiling** endpoints (optional)
 
-- Body: empty
+## API Documentation
 
-- Response: JSON string with code 1000 and message "Command completed successfully"
+See [API.md](API.md) for full API documentation including:
+- All endpoints (`/job`, `/job/{lookup}`, `/ping`, `/health`, `/ready`, `/metrics`)
+- Authentication methods
+- Rate limiting headers
+- Error codes and response formats
+- Request/response examples
+- CORS configuration
+- Circuit breaker behavior
 
+## Quick Examples
 
-## Example
+### Simple A record lookup
 
 ```bash
-$ ./zdns-rest --iterative
-$ curl -X POST \
+curl -X POST \
   -H "Content-Type: application/json" \
-  -d '{"module": "MXLOOKUP", "queries": ["google.com", "bing.com"]}' \
+  -d '{"module": "A", "queries": ["example.com"]}' \
   http://localhost:8080/job
 ```
 
-```json
-{
-  "data": {
-    "exchanges": [
-      {
-        "class": "IN",
-        "ipv4_addresses": [
-          "74.125.71.27",
-          "74.125.71.26",
-          "74.125.133.27",
-          "74.125.133.26",
-          "64.233.166.27"
-        ],
-        "name": "smtp.google.com",
-        "preference": 10,
-        "ttl": 300,
-        "type": "MX"
-      }
-    ]
-  },
-  "name": "google.com",
-  "status": "NOERROR",
-  "timestamp": "2025-02-02T17:28:04+01:00"
-}
-{
-  "data": {
-    "exchanges": [
-      {
-        "class": "IN",
-        "name": "bing-com.mail.protection.outlook.com",
-        "preference": 10,
-        "ttl": 3600,
-        "type": "MX"
-      }
-    ]
-  },
-  "name": "bing.com",
-  "status": "NOERROR",
-  "timestamp": "2025-02-02T18:01:47+01:00"
-}
+### Health check
+
+```bash
+curl http://localhost:8080/ping
+curl http://localhost:8080/health
+curl http://localhost:8080/metrics
 ```
+
+---
+
+## Development
+
+### Run tests
+
+```bash
+# Unit tests
+go test -v -race ./...
+
+# With coverage
+go test -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out
+
+# Integration tests
+go test -v -race -tags=integration ./...
+```
+
+### Install pre-commit hooks
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+### Format and lint
+
+```bash
+gofmt -w .
+go vet ./...
+go mod tidy
+```
+
+---
+
+## License
+
+See [LICENSE](LICENSE) file.

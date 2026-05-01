@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  zdns-rest:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - ZDNS_BIND_PORT=8080
+      - ZDNS_BIND_IP=0.0.0.0
+      - ZDNS_VERBOSITY=4
+      - ZDNS_THREADS=1000
+      - ZDNS_RATE_LIMIT=true
+      - ZDNS_RATE_LIMIT_REQUESTS=100
+      - ZDNS_RATE_LIMIT_WINDOW=60
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped

@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
-	"math/rand"
 	"net"
 	"os"
 	"regexp"
@@ -32,6 +30,33 @@ type GlobalConf struct {
 	Flags   *pflag.FlagSet
 	ApiPort int
 	ApiIP   string
+
+	// Rate limiting and validation
+	RateLimitEnabled   bool
+	RateLimitRequests  int
+	RateLimitWindow    int // seconds
+	MaxQueriesPerReq   int
+	MaxRequestBodySize int64 // bytes
+
+	// Security
+	TLSEnabled  bool
+	TLSCertFile string
+	TLSKeyFile  string
+	TLSAutoHTTP bool
+	APIKey      string
+
+	// CORS
+	CORSOrigins string
+	CORSMethods string
+	CORSHeaders string
+
+	// Operations
+	EnablePprof            bool
+	PprofPort              int
+	RequestTimeout         int // seconds
+	CircuitBreakerEnabled  bool
+	CircuitBreakerFailures int
+	CircuitBreakerTimeout  int // seconds
 }
 
 type ArgumentsConf struct {
@@ -145,7 +170,7 @@ func prepareConfig() {
 		var ns []string
 		if (AC.Servers_string)[0] == '@' {
 			filepath := (AC.Servers_string)[1:]
-			f, err := ioutil.ReadFile(filepath)
+			f, err := os.ReadFile(filepath)
 			if err != nil {
 				log.Fatalf("Unable to read file (%s): %s", filepath, err.Error())
 			}
@@ -189,19 +214,22 @@ func prepareConfig() {
 				log.Fatal("Unable to detect addresses of local interface: ", err)
 			}
 			for _, la := range addrs {
-				GC.LocalAddrs = append(GC.LocalAddrs, la.(*net.IPNet).IP)
-				GC.LocalAddrSpecified = true
+				if ipnet, ok := la.(*net.IPNet); ok {
+					GC.LocalAddrs = append(GC.LocalAddrs, ipnet.IP)
+					GC.LocalAddrSpecified = true
+				}
 			}
 			log.Info("using local interface: ", AC.Localif_string)
 		}
 	}
 	if !GC.LocalAddrSpecified {
 		// Find local address for use in unbound UDP sockets
-		if conn, err := net.Dial("udp", "8.8.8.8:53"); err != nil {
+		conn, err := net.Dial("udp", "8.8.8.8:53")
+		if err != nil {
 			log.Fatal("Unable to find default IP address: ", err)
-		} else {
-			GC.LocalAddrs = append(GC.LocalAddrs, conn.LocalAddr().(*net.UDPAddr).IP)
 		}
+		GC.LocalAddrs = append(GC.LocalAddrs, conn.LocalAddr().(*net.UDPAddr).IP)
+		conn.Close()
 	}
 	if AC.NanoSeconds {
 		GC.TimeFormat = time.RFC3339Nano
@@ -239,25 +267,21 @@ func prepareConfig() {
 
 	GC.OutputGroups = append(GC.OutputGroups, GC.ResultVerbosity)
 	GC.OutputGroups = append(GC.OutputGroups, groups...)
-
-	// Seeding for RandomNameServer()
-	rand.Seed(time.Now().UnixNano())
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func main() {
-	err := rootCmd.Execute()
-	if err != nil {
-		os.Exit(1)
+	if err := rootCmd.Execute(); err != nil {
+		log.Fatal(err)
 	}
 }
 
 // init sets up the default logging format and sets up the viper configuration reader.
 // It also sets up the root command and its flags.
 func init() {
-	rePort = regexp.MustCompile(":\\d+$")      // string ends with potential port number
-	reV6 = regexp.MustCompile("^([0-9a-f]*:)") // string starts like valid IPv6 address
+	rePort = regexp.MustCompile(`:\d+$`)       // string ends with potential port number
+	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`) // string starts like valid IPv6 address
 	log.SetFormatter(&log.TextFormatter{})
 
 	cobra.OnInitialize(initConfig)
@@ -285,6 +309,39 @@ func init() {
 
 	rootCmd.PersistentFlags().IntVar(&GC.ApiPort, "bind-port", 8080, "port to bind API to")
 	rootCmd.PersistentFlags().StringVar(&GC.ApiIP, "bind-ip", "", "ip to bind API to")
+
+	// Rate limiting and validation flags
+	rootCmd.PersistentFlags().BoolVar(&GC.RateLimitEnabled, "rate-limit", true, "enable rate limiting")
+	rootCmd.PersistentFlags().IntVar(&GC.RateLimitRequests, "rate-limit-requests", 100, "max requests per window per IP")
+	rootCmd.PersistentFlags().IntVar(&GC.RateLimitWindow, "rate-limit-window", 60, "rate limit window in seconds")
+	rootCmd.PersistentFlags().IntVar(&GC.MaxQueriesPerReq, "max-queries", 1000, "max queries per request")
+	rootCmd.PersistentFlags().Int64Var(&GC.MaxRequestBodySize, "max-body-size", 10*1024*1024, "max request body size in bytes (default 10MB)")
+
+	// TLS flags
+	rootCmd.PersistentFlags().BoolVar(&GC.TLSEnabled, "tls", false, "enable TLS/HTTPS")
+	rootCmd.PersistentFlags().StringVar(&GC.TLSCertFile, "tls-cert", "", "TLS certificate file")
+	rootCmd.PersistentFlags().StringVar(&GC.TLSKeyFile, "tls-key", "", "TLS key file")
+	rootCmd.PersistentFlags().BoolVar(&GC.TLSAutoHTTP, "tls-auto-http", false, "redirect HTTP to HTTPS when TLS is enabled")
+
+	// API Key authentication
+	rootCmd.PersistentFlags().StringVar(&GC.APIKey, "api-key", "", "API key for authentication (empty=disabled)")
+
+	// CORS flags
+	rootCmd.PersistentFlags().StringVar(&GC.CORSOrigins, "cors-origins", "", "allowed CORS origins (comma-separated, empty=CORS disabled)")
+	rootCmd.PersistentFlags().StringVar(&GC.CORSMethods, "cors-methods", "GET,POST", "allowed CORS methods")
+	rootCmd.PersistentFlags().StringVar(&GC.CORSHeaders, "cors-headers", "", "additional allowed CORS headers (comma-separated)")
+
+	// pprof flags
+	rootCmd.PersistentFlags().BoolVar(&GC.EnablePprof, "enable-pprof", false, "enable pprof profiling endpoints")
+	rootCmd.PersistentFlags().IntVar(&GC.PprofPort, "pprof-port", 6060, "port for pprof endpoints")
+
+	// Request timeout
+	rootCmd.PersistentFlags().IntVar(&GC.RequestTimeout, "request-timeout", 30, "HTTP request timeout in seconds")
+
+	// Circuit breaker flags
+	rootCmd.PersistentFlags().BoolVar(&GC.CircuitBreakerEnabled, "circuit-breaker", false, "enable circuit breaker for DNS lookups")
+	rootCmd.PersistentFlags().IntVar(&GC.CircuitBreakerFailures, "circuit-breaker-failures", 5, "circuit breaker failure threshold")
+	rootCmd.PersistentFlags().IntVar(&GC.CircuitBreakerTimeout, "circuit-breaker-timeout", 60, "circuit breaker timeout in seconds")
 
 	rootCmd.PersistentFlags().IntVar(&GC.Verbosity, "verbosity", 4, "log verbosity: 1 (lowest)--5 (highest)")
 	rootCmd.PersistentFlags().IntVar(&GC.Retries, "retries", 1, "how many times should zdns retry query if timeout or temporary failure")
@@ -365,13 +422,13 @@ func GetDefaultResolvers() []string {
 // AddDefaultPortToDNSServerName adds a default port of 53 to the given DNS server name.
 // If the DNS server name is an IPv6 address, it will be enclosed in square brackets.
 func AddDefaultPortToDNSServerName(s string) string {
+	// If the given string is an IPv6 address without brackets, enclose it in square brackets first
+	if reV6.MatchString(s) && !strings.HasPrefix(s, "[") {
+		s = "[" + s + "]"
+	}
 	// If the given string does not end with a port number, add 53
 	if !rePort.MatchString(s) {
 		return s + ":53"
-	}
-	// If the given string is an IPv6 address, enclose it in square brackets
-	if reV6.MatchString(s) {
-		return "[" + s + "]:53"
 	}
 	return s
 }
