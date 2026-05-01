@@ -10,10 +10,22 @@ permissions:
   packages: write
 
 jobs:
+  debug:
+    name: Debug workflow_run event
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print workflow_run event data
+        run: |
+          echo "conclusion: ${{ github.event.workflow_run.conclusion }}"
+          echo "head_branch: ${{ github.event.workflow_run.head_branch }}"
+          echo "ref: ${{ github.event.workflow_run.ref }}"
+          echo "head_sha: ${{ github.event.workflow_run.head_sha }}"
+          echo "event: ${{ github.event.workflow_run.event }}"
+
   build-binaries:
     name: Build Binaries
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.ref, 'refs/tags/v')
+    if: github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v')
     strategy:
       matrix:
         goos: [linux, windows, darwin]
