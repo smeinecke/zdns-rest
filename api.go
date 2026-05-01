@@ -488,7 +488,7 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 		if cache != nil && cache.enabled {
 			for _, query := range uncachedQueries {
 				if entry := cache.Get(gc.Module, query, nameserver, true); entry != nil {
-					w.Write([]byte(entry.Result + "\n"))
+					_, _ = w.Write([]byte(entry.Result + "\n"))
 					servedStale = true
 					log.WithFields(log.Fields{
 						"request_id": requestID,
@@ -514,13 +514,21 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 		if cache != nil && cache.enabled {
 			for _, query := range uncachedQueries {
 				if entry := cache.Get(gc.Module, query, nameserver, true); entry != nil {
-					w.Write([]byte(entry.Result + "\n"))
-					servedStale = true
-					log.WithFields(log.Fields{
-						"request_id": requestID,
-						"module":     gc.Module,
-						"domain":     query,
-					}).Warn("Served stale cache entry due to lookup error")
+					_, err := w.Write([]byte(entry.Result + "\n"))
+					if err != nil {
+						log.WithFields(log.Fields{
+							"request_id": requestID,
+							"module":     gc.Module,
+							"domain":     query,
+						}).Error("Failed to write stale cache entry: ", err)
+					} else {
+						servedStale = true
+						log.WithFields(log.Fields{
+							"request_id": requestID,
+							"module":     gc.Module,
+							"domain":     query,
+						}).Warn("Served stale cache entry due to lookup error")
+					}
 				}
 			}
 		}

@@ -180,7 +180,6 @@ func (jm *JobManager) processJob(job *Job) {
 	queries := make([]string, len(job.Queries))
 	copy(queries, job.Queries)
 
-	results := make([]string, 0, len(queries))
 	collector := NewOrderedResultCollector()
 
 	// Check for cancellation
@@ -292,7 +291,7 @@ func (jm *JobManager) processJob(job *Job) {
 	default:
 	}
 
-	results = collector.Ordered(queries)
+	results := collector.Ordered(queries)
 
 	job.mu.Lock()
 	job.Status = JobCompleted
@@ -589,7 +588,7 @@ func createJobRequest(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"job_id":     job.ID,
 		"status":     job.Status,
 		"created_at": job.CreatedAt,
@@ -634,7 +633,7 @@ func getJobRequest(w http.ResponseWriter, r *http.Request) {
 	job.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // getJobResultsRequest handles GET /jobs/{job_id}/results
@@ -656,12 +655,14 @@ func getJobResultsRequest(w http.ResponseWriter, r *http.Request) {
 			if status == JobPending || status == JobRunning {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusAccepted)
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				if err := json.NewEncoder(w).Encode(map[string]interface{}{
 					"status":   status,
 					"progress": progress,
 					"total":    total,
 					"message":  "Job is still processing",
-				})
+				}); err != nil {
+					log.Errorf("Error encoding JSON response: %v", err)
+				}
 				return
 			}
 
@@ -678,7 +679,7 @@ func getJobResultsRequest(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	for _, result := range results {
-		w.Write([]byte(result + "\n"))
+		_, _ = w.Write([]byte(result + "\n"))
 	}
 }
 
@@ -693,7 +694,7 @@ func cancelJobRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"code":    1000,
 		"message": "Job cancelled",
 	})
@@ -717,5 +718,5 @@ func listJobsRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
