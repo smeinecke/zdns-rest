@@ -120,6 +120,10 @@ go vet ./...
 go mod tidy
 ```
 
+### CI/CD
+
+See [CICD.md](CICD.md) for full CI/CD pipeline documentation.
+
 ---
 
 ## License
