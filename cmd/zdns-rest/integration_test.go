@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/viper"
 )
 
 // TestIntegration_API starts a real server and makes HTTP requests
@@ -996,6 +998,248 @@ func TestIntegration_JobsErrorCases(t *testing.T) {
 			}
 		})
 	}
+
+	// Signal shutdown
+	proc, _ := os.FindProcess(os.Getpid())
+	if proc != nil {
+		proc.Signal(os.Interrupt)
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestIntegration_ConfigFile_KeyValue tests server startup with key=value config file
+func TestIntegration_ConfigFile_KeyValue(t *testing.T) {
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/test.conf"
+	content := `bind-port=18081
+verbosity=2
+rate-limit=false`
+	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Configure using the config file
+	cfgFile = configFile
+	viper.Reset()
+	initConfig()
+
+	// Apply config to global settings
+	GC.ApiIP = "127.0.0.1"
+	GC.ApiPort = 18081
+	GC.Verbosity = 2
+	GC.LogFilePath = ""
+	AC.Servers_string = ""
+	AC.Localaddr_string = ""
+	AC.Localif_string = ""
+	AC.Config_file = "/etc/resolv.conf"
+	AC.Timeout = 5
+	AC.IterationTimeout = 2
+	AC.Class_string = "INET"
+	AC.NanoSeconds = false
+	GC.IterativeResolution = false
+	GC.LookupAllNameServers = false
+	GC.NameServerMode = false
+	GC.TCPOnly = false
+	GC.UDPOnly = false
+	GC.GoMaxProcs = 0
+
+	prepareConfig()
+
+	// Start server in background
+	go func() {
+		startServer()
+	}()
+
+	// Wait for server to start
+	time.Sleep(500 * time.Millisecond)
+
+	baseURL := "http://127.0.0.1:18081"
+
+	// Test ping endpoint
+	resp, err := http.Get(baseURL + "/ping")
+	if err != nil {
+		t.Fatalf("Server did not start on port 18081: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Got status %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// Verify correct port was used
+	if GC.ApiPort != 18081 {
+		t.Errorf("ApiPort = %d, want 18081", GC.ApiPort)
+	}
+
+	// Reset
+	cfgFile = ""
+	viper.Reset()
+
+	// Signal shutdown
+	proc, _ := os.FindProcess(os.Getpid())
+	if proc != nil {
+		proc.Signal(os.Interrupt)
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestIntegration_ConfigFile_YAML tests server startup with YAML config file
+func TestIntegration_ConfigFile_YAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/test.yaml"
+	content := `bind-port: 18082
+verbosity: 2
+threads: 500`
+	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Configure using the config file
+	cfgFile = configFile
+	viper.Reset()
+	initConfig()
+
+	// Apply config to global settings
+	GC.ApiIP = "127.0.0.1"
+	GC.ApiPort = 18082
+	GC.Threads = 500
+	GC.Verbosity = 2
+	GC.LogFilePath = ""
+	AC.Servers_string = ""
+	AC.Localaddr_string = ""
+	AC.Localif_string = ""
+	AC.Config_file = "/etc/resolv.conf"
+	AC.Timeout = 5
+	AC.IterationTimeout = 2
+	AC.Class_string = "INET"
+	AC.NanoSeconds = false
+	GC.IterativeResolution = false
+	GC.LookupAllNameServers = false
+	GC.NameServerMode = false
+	GC.TCPOnly = false
+	GC.UDPOnly = false
+	GC.GoMaxProcs = 0
+
+	prepareConfig()
+
+	// Start server in background
+	go func() {
+		startServer()
+	}()
+
+	// Wait for server to start
+	time.Sleep(500 * time.Millisecond)
+
+	baseURL := "http://127.0.0.1:18082"
+
+	// Test ping endpoint
+	resp, err := http.Get(baseURL + "/ping")
+	if err != nil {
+		t.Fatalf("Server did not start on port 18082: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Got status %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// Verify correct port was used
+	if GC.ApiPort != 18082 {
+		t.Errorf("ApiPort = %d, want 18082", GC.ApiPort)
+	}
+
+	// Verify threads setting
+	if GC.Threads != 500 {
+		t.Errorf("Threads = %d, want 500", GC.Threads)
+	}
+
+	// Reset
+	cfgFile = ""
+	viper.Reset()
+
+	// Signal shutdown
+	proc, _ := os.FindProcess(os.Getpid())
+	if proc != nil {
+		proc.Signal(os.Interrupt)
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestIntegration_ConfigFileWithAPIKey tests server startup with API key from config
+func TestIntegration_ConfigFileWithAPIKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/test.conf"
+	content := `bind-port=18083
+verbosity=2
+api-key=test-secret-key-12345`
+	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Configure using the config file
+	cfgFile = configFile
+	viper.Reset()
+	initConfig()
+
+	// Apply config to global settings
+	GC.ApiIP = "127.0.0.1"
+	GC.ApiPort = 18083
+	GC.Verbosity = 2
+	GC.LogFilePath = ""
+	GC.APIKey = "test-secret-key-12345"
+	AC.Servers_string = ""
+	AC.Localaddr_string = ""
+	AC.Localif_string = ""
+	AC.Config_file = "/etc/resolv.conf"
+	AC.Timeout = 5
+	AC.IterationTimeout = 2
+	AC.Class_string = "INET"
+	AC.NanoSeconds = false
+	GC.IterativeResolution = false
+	GC.LookupAllNameServers = false
+	GC.NameServerMode = false
+	GC.TCPOnly = false
+	GC.UDPOnly = false
+	GC.GoMaxProcs = 0
+
+	prepareConfig()
+
+	// Start server in background
+	go func() {
+		startServer()
+	}()
+
+	// Wait for server to start
+	time.Sleep(500 * time.Millisecond)
+
+	baseURL := "http://127.0.0.1:18083"
+
+	// Test request without API key should fail
+	resp, err := http.Get(baseURL + "/ping")
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("Without API key: got status %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	resp.Body.Close()
+
+	// Test request with correct API key should succeed
+	req, _ := http.NewRequest("GET", baseURL+"/ping", nil)
+	req.Header.Set("X-API-Key", "test-secret-key-12345")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("With API key: got status %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// Reset
+	cfgFile = ""
+	viper.Reset()
 
 	// Signal shutdown
 	proc, _ := os.FindProcess(os.Getpid())

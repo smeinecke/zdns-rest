@@ -1,0 +1,77 @@
+# ZDNS REST Server Configuration
+# Format: key=value (one per line)
+# For boolean values, use "true" or "false"
+# For strings with spaces, do not use quotes
+
+# Server binding
+bind-port=8080
+bind-ip=0.0.0.0
+
+# Logging (use journald when running under systemd)
+verbosity=4
+
+# Rate limiting
+rate-limit=true
+rate-limit-requests=100
+rate-limit-window=60
+max-queries=1000
+max-body-size=10485760
+
+# TLS/HTTPS (optional)
+tls=false
+tls-cert=/etc/zdns-rest/cert.pem
+tls-key=/etc/zdns-rest/key.pem
+tls-auto-http=false
+
+# API Key authentication (optional, empty=disabled)
+api-key=
+
+# CORS configuration (optional)
+cors-origins=
+cors-methods=GET,POST
+cors-headers=
+
+# Profiling (optional)
+enable-pprof=false
+pprof-port=6060
+
+# Request timeout
+request-timeout=30
+
+# Circuit breaker
+circuit-breaker=false
+circuit-breaker-failures=5
+circuit-breaker-timeout=60
+
+# DNS cache
+cache-enabled=true
+cache-ttl=300
+cache-max-size=10000
+cache-stale-ttl=150
+
+# DNS settings
+threads=1000
+go-processes=0
+timeout=15
+iteration-timeout=4
+retries=1
+max-depth=10
+cache-size=10000
+tcp-only=false
+udp-only=false
+recycle-sockets=true
+iterative=false
+
+# Name servers (comma-separated or leave empty for system defaults)
+name-servers=
+
+# Local address/interface
+local-addr=
+local-interface=
+
+# DNS class: INET, CSNET, CHAOS, HESIOD, NONE, ANY
+class=INET
+
+# Output
+result-verbosity=normal
+nanoseconds=false

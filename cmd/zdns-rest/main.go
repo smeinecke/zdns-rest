@@ -296,7 +296,7 @@ func init() {
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.zdns.yaml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: /etc/zdns-rest/zdns-rest.conf, $HOME/.zdns.yaml). Supports .conf/.env (key=value) and .yaml formats")
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
@@ -399,29 +399,82 @@ func BindFlags(cmd *cobra.Command, v *viper.Viper, envPrefix string) {
 	})
 }
 
-// initConfig reads in config file and ENV variables if set.
-func initConfig() {
-	if cfgFile != "" {
-		// Use config file from the flag.
-		viper.SetConfigFile(cfgFile)
-	} else {
-		// Find home directory.
-		home, err := os.UserHomeDir()
-		cobra.CheckErr(err)
+// loadKeyValueConfig reads a simple key=value config file and loads into viper
+func loadKeyValueConfig(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
 
-		// Search config in home directory with name ".zdns" (without extension).
-		viper.AddConfigPath(home)
-		viper.SetConfigType("yaml")
-		viper.SetConfigName(".zdns")
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Split on first =
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		viper.Set(key, value)
+	}
+	return nil
+}
+
+// initConfig reads in config file and ENV variables if set.
+// Supports YAML (.yaml, .yml) and key=value (.conf, .env) formats.
+func initConfig() {
+	isKeyValueFormat := false
+	configFile := cfgFile
+
+	if configFile != "" {
+		// Use config file from the flag.
+		// Auto-detect config type based on extension
+		if strings.HasSuffix(configFile, ".conf") || strings.HasSuffix(configFile, ".env") {
+			isKeyValueFormat = true
+		}
+	} else {
+		// Check for system-wide config first
+		sysConfig := "/etc/zdns-rest/zdns-rest.conf"
+		if _, err := os.Stat(sysConfig); err == nil {
+			configFile = sysConfig
+			isKeyValueFormat = true
+		} else {
+			// Find home directory for YAML config.
+			home, err := os.UserHomeDir()
+			cobra.CheckErr(err)
+			viper.AddConfigPath(home)
+			viper.SetConfigType("yaml")
+			viper.SetConfigName(".zdns")
+		}
 	}
 
 	viper.SetEnvPrefix(EnvPrefix)
 	viper.AutomaticEnv()
 
-	// If a config file is found, read it in.
-	if err := viper.ReadInConfig(); err == nil {
-		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+	// Load config file if specified or found
+	if configFile != "" {
+		if isKeyValueFormat {
+			if err := loadKeyValueConfig(configFile); err == nil {
+				fmt.Fprintln(os.Stderr, "Using config file:", configFile)
+			}
+		} else {
+			viper.SetConfigFile(configFile)
+			if err := viper.ReadInConfig(); err == nil {
+				fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+			}
+		}
+	} else {
+		// Try viper's default search path
+		if err := viper.ReadInConfig(); err == nil {
+			fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+		}
 	}
+
 	// Bind the current command's flags to viper
 	BindFlags(rootCmd, viper.GetViper(), EnvPrefix)
 }

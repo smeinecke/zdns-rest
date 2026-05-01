@@ -226,6 +226,259 @@ func TestInitConfig_NonexistentFile(t *testing.T) {
 	cfgFile = ""
 }
 
+func TestLoadKeyValueConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected map[string]string
+		wantErr  bool
+	}{
+		{
+			name:    "simple key=value pairs",
+			content: "bind-port=9090\nverbosity=5",
+			expected: map[string]string{
+				"bind-port": "9090",
+				"verbosity": "5",
+			},
+			wantErr: false,
+		},
+		{
+			name:    "with comments",
+			content: "# This is a comment\nbind-port=8080\n# Another comment\nverbosity=3",
+			expected: map[string]string{
+				"bind-port": "8080",
+				"verbosity": "3",
+			},
+			wantErr: false,
+		},
+		{
+			name:    "empty lines",
+			content: "bind-port=8080\n\n\nverbosity=4",
+			expected: map[string]string{
+				"bind-port": "8080",
+				"verbosity": "4",
+			},
+			wantErr: false,
+		},
+		{
+			name:    "spaces around equals",
+			content: "bind-port = 9090\nverbosity = 3",
+			expected: map[string]string{
+				"bind-port": "9090",
+				"verbosity": "3",
+			},
+			wantErr: false,
+		},
+		{
+			name:    "value with equals sign",
+			content: "api-key=secret=value=with=equals",
+			expected: map[string]string{
+				"api-key": "secret=value=with=equals",
+			},
+			wantErr: false},
+		{
+			name:    "empty value",
+			content: "api-key=\nbind-port=8080",
+			expected: map[string]string{
+				"api-key":   "",
+				"bind-port": "8080",
+			},
+			wantErr: false,
+		},
+		{
+			name:     "file does not exist",
+			content:  "",
+			expected: nil,
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			viper.Reset()
+
+			var configPath string
+			if tt.expected != nil || tt.content != "" {
+				tmpDir := t.TempDir()
+				configPath = tmpDir + "/test.conf"
+				if err := os.WriteFile(configPath, []byte(tt.content), 0644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				configPath = "/nonexistent/path/config.conf"
+			}
+
+			err := loadKeyValueConfig(configPath)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("loadKeyValueConfig() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if tt.expected != nil {
+				for key, expectedValue := range tt.expected {
+					if viper.GetString(key) != expectedValue {
+						t.Errorf("loadKeyValueConfig() key %q = %q, want %q",
+							key, viper.GetString(key), expectedValue)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestLoadKeyValueConfig_BooleanValues(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := tmpDir + "/test.conf"
+	content := `rate-limit=true
+cache-enabled=false
+tls=true`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	viper.Reset()
+	err := loadKeyValueConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadKeyValueConfig() error = %v", err)
+	}
+
+	// Verify boolean values are stored as strings (viper handles conversion)
+	if viper.GetString("rate-limit") != "true" {
+		t.Errorf("rate-limit = %v, want true", viper.GetString("rate-limit"))
+	}
+	if viper.GetString("cache-enabled") != "false" {
+		t.Errorf("cache-enabled = %v, want false", viper.GetString("cache-enabled"))
+	}
+	if viper.GetString("tls") != "true" {
+		t.Errorf("tls = %v, want true", viper.GetString("tls"))
+	}
+}
+
+func TestLoadKeyValueConfig_EmptyAndCommentOnly(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := tmpDir + "/test.conf"
+	content := `# This is a comment only file
+# No actual configuration
+
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	viper.Reset()
+	err := loadKeyValueConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadKeyValueConfig() error = %v", err)
+	}
+
+	// Should not have any keys set
+	allSettings := viper.AllSettings()
+	if len(allSettings) != 0 {
+		t.Errorf("Expected no settings, got %v", allSettings)
+	}
+}
+
+func TestInitConfig_WithConfFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/test.conf"
+	content := `bind-port=9090
+verbosity=5
+rate-limit=false`
+	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgFile = configFile
+	viper.Reset()
+	initConfig()
+
+	// Verify values were loaded
+	if viper.GetString("bind-port") != "9090" {
+		t.Errorf("bind-port = %v, want 9090", viper.GetString("bind-port"))
+	}
+	if viper.GetString("verbosity") != "5" {
+		t.Errorf("verbosity = %v, want 5", viper.GetString("verbosity"))
+	}
+	if viper.GetString("rate-limit") != "false" {
+		t.Errorf("rate-limit = %v, want false", viper.GetString("rate-limit"))
+	}
+
+	// Reset
+	cfgFile = ""
+	viper.Reset()
+}
+
+func TestInitConfig_ConfFileAutoDetection(t *testing.T) {
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/zdns-rest.conf"
+	content := `bind-port=7070`
+	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgFile = configFile
+	viper.Reset()
+	initConfig()
+
+	if viper.GetString("bind-port") != "7070" {
+		t.Errorf("bind-port = %v, want 7070", viper.GetString("bind-port"))
+	}
+
+	// Reset
+	cfgFile = ""
+	viper.Reset()
+}
+
+func TestInitConfig_EnvFileExtension(t *testing.T) {
+	tmpDir := t.TempDir()
+	configFile := tmpDir + "/config.env"
+	content := `bind-port=6060
+verbosity=2`
+	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgFile = configFile
+	viper.Reset()
+	initConfig()
+
+	if viper.GetString("bind-port") != "6060" {
+		t.Errorf("bind-port = %v, want 6060", viper.GetString("bind-port"))
+	}
+	if viper.GetString("verbosity") != "2" {
+		t.Errorf("verbosity = %v, want 2", viper.GetString("verbosity"))
+	}
+
+	// Reset
+	cfgFile = ""
+	viper.Reset()
+}
+
+func TestLoadKeyValueConfig_MultipleEquals(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := tmpDir + "/test.conf"
+	content := `cors-origins=http://example.com,https://example.com
+name-servers=8.8.8.8,1.1.1.1`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	viper.Reset()
+	err := loadKeyValueConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadKeyValueConfig() error = %v", err)
+	}
+
+	if viper.GetString("cors-origins") != "http://example.com,https://example.com" {
+		t.Errorf("cors-origins = %v, want http://example.com,https://example.com",
+			viper.GetString("cors-origins"))
+	}
+	if viper.GetString("name-servers") != "8.8.8.8,1.1.1.1" {
+		t.Errorf("name-servers = %v, want 8.8.8.8,1.1.1.1",
+			viper.GetString("name-servers"))
+	}
+}
+
 func TestPrepareConfig_LogFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	logFile := tmpDir + "/test.log"
