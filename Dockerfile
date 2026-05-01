@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o zdns-rest .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o zdns-rest ./cmd/zdns-rest
 
 # Final stage
 FROM alpine:3.19

@@ -11,7 +11,7 @@ all: build
 ## build: Build the binary
 build:
 	@echo "Building $(BINARY_NAME)..."
-	$(GO) build $(GOFLAGS) -o $(BINARY_NAME) .
+	$(GO) build $(GOFLAGS) -o $(BINARY_NAME) ./cmd/zdns-rest
 
 ## test: Run unit tests with race detection
 test:

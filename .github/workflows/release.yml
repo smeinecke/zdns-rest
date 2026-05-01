@@ -82,7 +82,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          CGO_ENABLED=0 go build -ldflags="-s -w" -o zdns-rest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} .
+          CGO_ENABLED=0 go build -ldflags="-s -w" -o zdns-rest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/zdns-rest
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
