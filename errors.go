@@ -44,5 +44,5 @@ func ErrorResponse(w http.ResponseWriter, err ErrorCode, detail string) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(err.HTTPStatus)
-	json.NewEncoder(w).Encode(APIResultType{Code: err.Code, Message: msg})
+	_ = json.NewEncoder(w).Encode(APIResultType{Code: err.Code, Message: msg})
 }

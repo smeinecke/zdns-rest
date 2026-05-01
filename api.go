@@ -118,7 +118,7 @@ func RateLimitMiddleware(next http.Handler, limiter *RateLimiter) http.Handler {
 			w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", limiter.limit))
 			w.Header().Set("X-RateLimit-Window", fmt.Sprintf("%v", limiter.window))
 			w.WriteHeader(http.StatusTooManyRequests)
-			json.NewEncoder(w).Encode(APIResultType{
+			_ = json.NewEncoder(w).Encode(APIResultType{
 				Code:    3000,
 				Message: "Rate limit exceeded. Please try again later.",
 			})
@@ -163,7 +163,7 @@ func APIResult(w http.ResponseWriter, code int, message string) {
 	if code >= 2000 {
 		w.WriteHeader(http.StatusBadRequest)
 	}
-	json.NewEncoder(w).Encode(APIResultType{Code: code,
+	_ = json.NewEncoder(w).Encode(APIResultType{Code: code,
 		Message: message,
 	})
 }
@@ -215,7 +215,7 @@ type healthResponse struct {
 // healthRequest is the handler for the GET /health route
 func healthRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(healthResponse{
+	_ = json.NewEncoder(w).Encode(healthResponse{
 		Code:      1000,
 		Message:   "Healthy",
 		Status:    "up",
@@ -234,7 +234,7 @@ type readyResponse struct {
 func readyRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	ready := true
-	json.NewEncoder(w).Encode(readyResponse{
+	_ = json.NewEncoder(w).Encode(readyResponse{
 		Code:    1000,
 		Message: "Ready",
 		Ready:   ready,

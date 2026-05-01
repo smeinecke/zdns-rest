@@ -605,7 +605,7 @@ func TestLimitBodySize(t *testing.T) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		w.Write(body)
+		_, _ = w.Write(body)
 	}), 100)
 
 	w := httptest.NewRecorder()

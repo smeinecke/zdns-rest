@@ -10,7 +10,7 @@ import (
 func TestLoggingMiddleware(t *testing.T) {
 	handler := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 
 	w := httptest.NewRecorder()
@@ -116,7 +116,7 @@ func TestLoggingResponseWriter(t *testing.T) {
 		requestID:      "test-id",
 	}
 
-	lrw2.Write([]byte("hello"))
+	_, _ = lrw2.Write([]byte("hello"))
 	if w2.Code != http.StatusOK {
 		t.Errorf("Write triggered status = %d, want %d", w2.Code, http.StatusOK)
 	}
@@ -136,7 +136,7 @@ func TestLoggingResponseWriter(t *testing.T) {
 func TestMetricsMiddleware(t *testing.T) {
 	handler := MetricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 
 	w := httptest.NewRecorder()
@@ -195,7 +195,7 @@ func TestRecoverMiddleware(t *testing.T) {
 func TestRecoverMiddleware_NoPanic(t *testing.T) {
 	handler := RecoverMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("success"))
+		_, _ = w.Write([]byte("success"))
 	}))
 
 	w := httptest.NewRecorder()

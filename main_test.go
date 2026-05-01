@@ -105,11 +105,7 @@ func TestLocalAddrParsing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ip := net.ParseIP(tt.addr)
-			if tt.wantErr {
-				if ip != nil && tt.addr == "not-an-ip" {
-					// net.ParseIP returns nil for invalid, which is expected
-				}
-			} else {
+			if !tt.wantErr {
 				if ip == nil {
 					t.Errorf("net.ParseIP(%q) returned nil", tt.addr)
 				}
@@ -209,7 +205,9 @@ func TestInitConfig(t *testing.T) {
 func TestInitConfig_WithCustomConfigFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	configFile := tmpDir + "/test-config.yaml"
-	os.WriteFile(configFile, []byte("threads: 500\ntimeout: 20\n"), 0644)
+	if err := os.WriteFile(configFile, []byte("threads: 500\ntimeout: 20\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	cfgFile = configFile
 	initConfig()
@@ -368,7 +366,9 @@ func TestPrepareConfig_Nanoseconds(t *testing.T) {
 func TestPrepareConfig_WithNameServers(t *testing.T) {
 	tmpDir := t.TempDir()
 	serversFile := tmpDir + "/servers.txt"
-	os.WriteFile(serversFile, []byte("8.8.8.8\n1.1.1.1\n"), 0644)
+	if err := os.WriteFile(serversFile, []byte("8.8.8.8\n1.1.1.1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	rePort = regexp.MustCompile(`:\d+$`)
 	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
