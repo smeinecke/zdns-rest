@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -57,56 +58,81 @@ func (h *StreamOutputHandler) WriteResults(results <-chan string, wg *sync.WaitG
 
 // CachedStreamOutputHandler wraps StreamOutputHandler with caching
 type CachedStreamOutputHandler struct {
-	*StreamOutputHandler
 	module     string
 	nameserver string
 	requestID  string
-	mu         sync.Mutex
+	collector  *OrderedResultCollector
 }
 
 // NewCachedStreamOutputHandler creates a new caching-aware output handler
-func NewCachedStreamOutputHandler(w http.ResponseWriter, module, nameserver, requestID string) *CachedStreamOutputHandler {
+func NewCachedStreamOutputHandler(module, nameserver, requestID string) *CachedStreamOutputHandler {
 	return &CachedStreamOutputHandler{
-		StreamOutputHandler: NewStreamOutputHandler(w),
-		module:              module,
-		nameserver:          nameserver,
-		requestID:           requestID,
+		module:     module,
+		nameserver: nameserver,
+		requestID:  requestID,
+		collector:  nil,
 	}
 }
 
-// WriteResultsWithCache writes results and caches them
-func (h *CachedStreamOutputHandler) WriteResultsWithCache(results <-chan string, wg *sync.WaitGroup) error {
+// WriteResults writes results to the response stream and stores them in cache.
+func (h *CachedStreamOutputHandler) WriteResults(results <-chan string, wg *sync.WaitGroup) error {
 	defer (*wg).Done()
 
 	cache := GetCache()
 
 	for n := range results {
-		// Write to response
-		if _, err := h.writer.Write([]byte(n + "\n")); err != nil {
-			return err
+		var result map[string]interface{}
+		if err := json.Unmarshal([]byte(n), &result); err == nil {
+			if name, ok := result["name"].(string); ok && h.collector != nil {
+				h.collector.Add(name, n)
+			}
 		}
 
 		// Cache the result if caching is enabled
 		if cache != nil && cache.enabled {
-			// Parse the result to extract domain name
-			var result map[string]interface{}
-			if err := json.Unmarshal([]byte(n), &result); err == nil {
-				if name, ok := result["name"].(string); ok {
-					cache.Set(h.module, name, h.nameserver, n)
-					log.WithFields(log.Fields{
-						"request_id": h.requestID,
-						"module":     h.module,
-						"domain":     name,
-					}).Debug("Cached DNS result")
-				}
+			if name, ok := result["name"].(string); ok {
+				cache.Set(h.module, name, h.nameserver, n)
+				log.WithFields(log.Fields{
+					"request_id": h.requestID,
+					"module":     h.module,
+					"domain":     name,
+				}).Debug("Cached DNS result")
 			}
 		}
 	}
 
-	if f, ok := h.writer.(http.Flusher); ok {
-		f.Flush()
-	}
 	return nil
+}
+
+type OrderedResultCollector struct {
+	mu      sync.Mutex
+	results map[string][]string
+}
+
+func NewOrderedResultCollector() *OrderedResultCollector {
+	return &OrderedResultCollector{
+		results: make(map[string][]string),
+	}
+}
+
+func (c *OrderedResultCollector) Add(query, result string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.results[query] = append(c.results[query], result)
+}
+
+func (c *OrderedResultCollector) Ordered(queries []string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	ordered := make([]string, 0, len(queries))
+	for _, query := range queries {
+		if queue := c.results[query]; len(queue) > 0 {
+			ordered = append(ordered, queue[0])
+			c.results[query] = queue[1:]
+		}
+	}
+	return ordered
 }
 
 // domainRegex validates RFC 1123 hostnames
@@ -324,8 +350,11 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 	var queries []string
 	var module string
 
-	req_content_type := r.Header.Get("Content-Type")
-	if req_content_type == "application/json" {
+	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil {
+		contentType = ""
+	}
+	if contentType == "application/json" {
 		reqBody, err := io.ReadAll(r.Body)
 		if err != nil {
 			ErrorResponse(w, ErrReadRequest, err.Error())
@@ -408,12 +437,12 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 
 	// Check cache for queries and collect uncached ones
 	var uncachedQueries []string
-	cacheHits := make(map[string]string)
+	collector := NewOrderedResultCollector()
 
 	if cache != nil && cache.enabled {
 		for _, query := range queries {
-			if entry := cache.Get(gc.Module, query, nameserver, true); entry != nil {
-				cacheHits[query] = entry.Result
+			if entry := cache.Get(gc.Module, query, nameserver, false); entry != nil {
+				collector.Add(query, entry.Result)
 				log.WithFields(log.Fields{
 					"request_id": requestID,
 					"module":     gc.Module,
@@ -427,13 +456,11 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 		uncachedQueries = queries
 	}
 
-	// Write cached results immediately
-	for _, result := range cacheHits {
-		w.Write([]byte(result + "\n"))
-	}
-
 	// If all queries were cached, we're done
 	if len(uncachedQueries) == 0 {
+		for _, result := range collector.Ordered(queries) {
+			_, _ = w.Write([]byte(result + "\n"))
+		}
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -445,8 +472,9 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 	gc.InputHandler = iohandlers.NewStreamInputHandler(t)
 
 	// Use caching output handler
-	cachedHandler := NewCachedStreamOutputHandler(w, gc.Module, nameserver, requestID)
-	gc.OutputHandler = cachedHandler.StreamOutputHandler
+	cachedHandler := NewCachedStreamOutputHandler(gc.Module, nameserver, requestID)
+	cachedHandler.collector = collector
+	gc.OutputHandler = cachedHandler
 
 	factory.SetFlags(GC.Flags)
 
@@ -511,6 +539,14 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 	if err := factory.Finalize(); err != nil {
 		ErrorResponse(w, ErrFactoryFinalize, err.Error())
 		return
+	}
+
+	for _, result := range collector.Ordered(queries) {
+		_, _ = w.Write([]byte(result + "\n"))
+	}
+
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 

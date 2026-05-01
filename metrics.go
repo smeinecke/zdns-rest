@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -105,6 +106,32 @@ func (rr *responseRecorder) WriteHeader(code int) {
 		rr.written = true
 		rr.ResponseWriter.WriteHeader(code)
 	}
+}
+
+func (rr *responseRecorder) Write(b []byte) (int, error) {
+	if !rr.written {
+		rr.WriteHeader(http.StatusOK)
+	}
+	return rr.ResponseWriter.Write(b)
+}
+
+func (rr *responseRecorder) Flush() {
+	if flusher, ok := rr.ResponseWriter.(http.Flusher); ok {
+		if !rr.written {
+			rr.WriteHeader(http.StatusOK)
+		}
+		flusher.Flush()
+	}
+}
+
+func (rr *responseRecorder) ReadFrom(r io.Reader) (int64, error) {
+	if rf, ok := rr.ResponseWriter.(io.ReaderFrom); ok {
+		if !rr.written {
+			rr.WriteHeader(http.StatusOK)
+		}
+		return rf.ReadFrom(r)
+	}
+	return io.Copy(rr.ResponseWriter, r)
 }
 
 // MetricsHandler returns the Prometheus metrics HTTP handler

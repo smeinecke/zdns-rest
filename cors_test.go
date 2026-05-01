@@ -35,58 +35,6 @@ func TestSplitAndTrim(t *testing.T) {
 	}
 }
 
-func TestSplitString(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		sep      string
-		expected []string
-	}{
-		{"comma sep", "a,b,c", ",", []string{"a", "b", "c"}},
-		{"multi char sep", "a::b::c", "::", []string{"a", "b", "c"}},
-		{"no sep", "abc", ",", []string{"abc"}},
-		{"empty string", "", ",", []string{""}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := splitString(tt.input, tt.sep)
-			if len(result) != len(tt.expected) {
-				t.Errorf("splitString(%q, %q) = %v, want %v", tt.input, tt.sep, result, tt.expected)
-			}
-			for i := range result {
-				if result[i] != tt.expected[i] {
-					t.Errorf("splitString(%q, %q)[%d] = %q, want %q", tt.input, tt.sep, i, result[i], tt.expected[i])
-				}
-			}
-		})
-	}
-}
-
-func TestTrimSpace(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{"spaces", "  hello  ", "hello"},
-		{"tabs", "\thello\t", "hello"},
-		{"mixed", " \t hello \n \r ", "hello"},
-		{"no trim", "hello", "hello"},
-		{"empty", "", ""},
-		{"only spaces", "   ", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := trimSpace(tt.input)
-			if result != tt.expected {
-				t.Errorf("trimSpace(%q) = %q, want %q", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
-
 func TestCORSConfigFromFlags(t *testing.T) {
 	tests := []struct {
 		name           string

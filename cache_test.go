@@ -56,8 +56,27 @@ func TestNewDNSCache(t *testing.T) {
 			assert.Equal(t, tt.wantStale, cache.staleTTL)
 			assert.NotNil(t, cache.entries)
 			assert.NotNil(t, cache.lruList)
+			assert.NotNil(t, cache.lruIndex)
 		})
 	}
+}
+
+func TestDNSCache_NilReceiver(t *testing.T) {
+	var cache *DNSCache
+
+	assert.Nil(t, cache.Get("A", "example.com", "8.8.8.8:53", false))
+	assert.NotPanics(t, func() {
+		cache.Set("A", "example.com", "8.8.8.8:53", "value")
+		cache.Delete("A", "example.com", "8.8.8.8:53")
+		cache.Clear()
+		cache.Cleanup()
+	})
+	assert.Equal(t, 0, cache.Size())
+	assert.Equal(t, CacheStats{}, cache.Stats())
+
+	stop := cache.StartCleanup(time.Millisecond)
+	assert.NotNil(t, stop)
+	close(stop)
 }
 
 func TestGenerateCacheKey(t *testing.T) {
@@ -301,6 +320,21 @@ func TestDNSCacheLRUEviction(t *testing.T) {
 	assert.NotNil(t, cache.Get("A", "domain4.com", "8.8.8.8:53", false))
 }
 
+func TestDNSCacheUpdateExistingDoesNotDuplicateLRU(t *testing.T) {
+	cache := NewDNSCache(true, 3, time.Hour)
+
+	cache.Set("A", "example.com", "8.8.8.8:53", `{"result":"1"}`)
+	cache.Set("A", "example.com", "8.8.8.8:53", `{"result":"2"}`)
+
+	assert.Equal(t, 1, cache.Size())
+	assert.Equal(t, 1, cache.lruList.Len())
+	assert.Len(t, cache.lruIndex, 1)
+
+	entry := cache.Get("A", "example.com", "8.8.8.8:53", false)
+	assert.NotNil(t, entry)
+	assert.Equal(t, `{"result":"2"}`, entry.Result)
+}
+
 func TestDNSCacheDelete(t *testing.T) {
 	cache := NewDNSCache(true, 100, time.Hour)
 
@@ -388,6 +422,26 @@ func TestDisabledCache(t *testing.T) {
 
 	stats := cache.Stats()
 	assert.Equal(t, 0, stats.Size)
+}
+
+func TestInitCacheReinitialization(t *testing.T) {
+	InitCache(true, 10, time.Minute)
+	first := GetCache()
+	assert.NotNil(t, first)
+	assert.True(t, first.enabled)
+
+	InitCache(false, 0, 0)
+	second := GetCache()
+	assert.NotNil(t, second)
+	assert.False(t, second.enabled)
+	assert.NotSame(t, first, second)
+
+	InitCache(true, 5, time.Second)
+	third := GetCache()
+	assert.NotNil(t, third)
+	assert.True(t, third.enabled)
+	assert.Equal(t, 5, third.maxSize)
+	assert.Equal(t, time.Second, third.ttl)
 }
 
 func TestCacheStatsToJSON(t *testing.T) {

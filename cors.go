@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/rs/cors"
 	log "github.com/sirupsen/logrus"
@@ -67,37 +68,10 @@ func CORSConfigFromFlags(origins, methods, headers string) CORSConfig {
 // splitAndTrim splits a string by separator and trims whitespace from each part
 func splitAndTrim(s, sep string) []string {
 	parts := []string{}
-	for _, p := range splitString(s, sep) {
-		if trimmed := trimSpace(p); trimmed != "" {
+	for _, p := range strings.Split(s, sep) {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
 			parts = append(parts, trimmed)
 		}
 	}
 	return parts
-}
-
-// Helper functions to avoid import conflicts
-func splitString(s, sep string) []string {
-	var result []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if i < len(s)-len(sep)+1 && s[i:i+len(sep)] == sep {
-			result = append(result, s[start:i])
-			start = i + len(sep)
-			i += len(sep) - 1
-		}
-	}
-	result = append(result, s[start:])
-	return result
-}
-
-func trimSpace(s string) string {
-	start := 0
-	end := len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r') {
-		end--
-	}
-	return s[start:end]
 }

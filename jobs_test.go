@@ -1,13 +1,62 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"regexp"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 )
 
+func setupJobTestConfig(t *testing.T) {
+	t.Helper()
+
+	GC = GlobalConf{}
+	AC = ArgumentsConf{}
+
+	GC.Verbosity = 2
+	GC.LogFilePath = ""
+	GC.IterativeResolution = false
+	GC.LookupAllNameServers = false
+	GC.NameServerMode = false
+	GC.TCPOnly = false
+	GC.UDPOnly = false
+	GC.GoMaxProcs = 0
+	GC.MaxQueriesPerReq = 1000
+	GC.RequestTimeout = 30
+	GC.ResultVerbosity = "normal"
+	GC.IncludeInOutput = ""
+
+	AC.Servers_string = ""
+	AC.Localaddr_string = ""
+	AC.Localif_string = ""
+	AC.Config_file = "/etc/resolv.conf"
+	AC.Timeout = 5
+	AC.IterationTimeout = 2
+	AC.Class_string = "INET"
+	AC.NanoSeconds = false
+
+	rePort = regexp.MustCompile(`:\d+$`)
+	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
+	prepareConfig()
+}
+
+func newIdleJobManager() *JobManager {
+	return &JobManager{
+		jobs:        make(map[string]*Job),
+		workerCount: 1,
+		jobQueue:    make(chan *Job, 1000),
+		shutdown:    make(chan struct{}),
+	}
+}
+
 func TestNewJobManager(t *testing.T) {
+	setupJobTestConfig(t)
+
 	jm := NewJobManager(5)
 	assert.NotNil(t, jm)
 	assert.Equal(t, 5, jm.workerCount)
@@ -19,14 +68,17 @@ func TestNewJobManager(t *testing.T) {
 }
 
 func TestNewJobManager_DefaultWorkers(t *testing.T) {
+	setupJobTestConfig(t)
+
 	jm := NewJobManager(0)
 	assert.Equal(t, 10, jm.workerCount)
 	jm.Stop()
 }
 
 func TestJobManager_SubmitJob(t *testing.T) {
-	jm := NewJobManager(2)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	queries := []string{"example.com", "example.org"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -51,16 +103,18 @@ func TestJobManager_SubmitJob(t *testing.T) {
 }
 
 func TestJobManager_GetJob_NotFound(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	job := jm.GetJob("nonexistent-id")
 	assert.Nil(t, job)
 }
 
 func TestJobManager_GetJobStatus(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -74,8 +128,9 @@ func TestJobManager_GetJobStatus(t *testing.T) {
 }
 
 func TestJobManager_GetJobStatus_NotFound(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	_, _, _, err := jm.GetJobStatus("nonexistent-id")
 	assert.Error(t, err)
@@ -83,8 +138,9 @@ func TestJobManager_GetJobStatus_NotFound(t *testing.T) {
 }
 
 func TestJobManager_GetJobResults_NotComplete(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -96,8 +152,9 @@ func TestJobManager_GetJobResults_NotComplete(t *testing.T) {
 }
 
 func TestJobManager_GetJobResults_NotFound(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	results, err := jm.GetJobResults("nonexistent-id")
 	assert.Error(t, err)
@@ -106,8 +163,9 @@ func TestJobManager_GetJobResults_NotFound(t *testing.T) {
 }
 
 func TestJobManager_CancelJob(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -124,8 +182,9 @@ func TestJobManager_CancelJob(t *testing.T) {
 }
 
 func TestJobManager_CancelJob_NotFound(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	err := jm.CancelJob("nonexistent-id")
 	assert.Error(t, err)
@@ -133,8 +192,9 @@ func TestJobManager_CancelJob_NotFound(t *testing.T) {
 }
 
 func TestJobManager_CancelJob_AlreadyCompleted(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -151,8 +211,9 @@ func TestJobManager_CancelJob_AlreadyCompleted(t *testing.T) {
 }
 
 func TestJobManager_ListJobs(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	// Submit multiple jobs
 	job1 := jm.SubmitJob("A", []string{"example.com"}, "8.8.8.8:53")
@@ -170,8 +231,9 @@ func TestJobManager_ListJobs(t *testing.T) {
 }
 
 func TestJobManager_CleanupOldJobs(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	// Create a job and manually set it as completed with old creation time
 	queries := []string{"example.com"}
@@ -193,8 +255,9 @@ func TestJobManager_CleanupOldJobs(t *testing.T) {
 }
 
 func TestJobManager_CleanupOldJobs_DoesNotRemoveRecent(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -215,8 +278,9 @@ func TestJobManager_CleanupOldJobs_DoesNotRemoveRecent(t *testing.T) {
 }
 
 func TestJobManager_CleanupOldJobs_DoesNotRemoveRunning(t *testing.T) {
-	jm := NewJobManager(1)
-	defer jm.Stop()
+	setupJobTestConfig(t)
+
+	jm := newIdleJobManager()
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -275,4 +339,85 @@ func TestJobStruct_JSONTags(t *testing.T) {
 	assert.Equal(t, 1, job.Total)
 	assert.Equal(t, "8.8.8.8:53", job.Nameserver)
 	assert.NotNil(t, job.Metadata)
+}
+
+func TestJobOutputHandler_WriteResults(t *testing.T) {
+	InitCache(true, 100, time.Hour)
+	defer InitCache(false, 0, 0)
+
+	job := &Job{}
+	collector := NewOrderedResultCollector()
+	handler := &JobOutputHandler{
+		job:        job,
+		module:     "A",
+		nameserver: "8.8.8.8:53",
+		collector:  collector,
+	}
+
+	results := make(chan string, 1)
+	results <- `{"name":"example.com","status":"NOERROR"}`
+	close(results)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	err := handler.WriteResults(results, &wg)
+	wg.Wait()
+
+	assert.NoError(t, err)
+	collected := collector.Ordered([]string{"example.com"})
+	assert.Equal(t, 1, len(collected))
+	assert.Equal(t, 1, job.Progress)
+
+	entry := GetCache().Get("A", "example.com", "8.8.8.8:53", false)
+	assert.NotNil(t, entry)
+	assert.Equal(t, collected[0], entry.Result)
+}
+
+func TestBuildQueryInput(t *testing.T) {
+	assert.Equal(t, "example.com\nexample.org\n", buildQueryInput([]string{"example.com", "example.org"}))
+	assert.Equal(t, "", buildQueryInput(nil))
+}
+
+func TestGetJobResultsRequest_FailedJob(t *testing.T) {
+	jobManager = newIdleJobManager()
+	job := &Job{
+		ID:       "job-failed",
+		Status:   JobFailed,
+		Progress: 1,
+		Total:    2,
+		Error:    "lookup failed",
+	}
+	jobManager.jobs[job.ID] = job
+
+	r := httptest.NewRequest("GET", "/jobs/"+job.ID+"/results", nil)
+	r = mux.SetURLVars(r, map[string]string{"job_id": job.ID})
+	w := httptest.NewRecorder()
+
+	getJobResultsRequest(w, r)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "lookup failed")
+	assert.NotContains(t, w.Body.String(), "still processing")
+}
+
+func TestGetJobResultsRequest_CancelledJob(t *testing.T) {
+	jobManager = newIdleJobManager()
+	job := &Job{
+		ID:       "job-cancelled",
+		Status:   JobCancelled,
+		Progress: 1,
+		Total:    2,
+	}
+	jobManager.jobs[job.ID] = job
+
+	r := httptest.NewRequest("GET", "/jobs/"+job.ID+"/results", nil)
+	r = mux.SetURLVars(r, map[string]string{"job_id": job.ID})
+	w := httptest.NewRecorder()
+
+	getJobResultsRequest(w, r)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "cancelled")
+	assert.NotContains(t, w.Body.String(), "still processing")
 }

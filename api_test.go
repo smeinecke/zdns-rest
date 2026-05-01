@@ -250,6 +250,59 @@ func TestStreamOutputHandler_EmptyChannel(t *testing.T) {
 	}
 }
 
+func TestCachedStreamOutputHandler_CachesResults(t *testing.T) {
+	InitCache(true, 100, time.Hour)
+	defer InitCache(false, 0, 0)
+
+	handler := NewCachedStreamOutputHandler("A", "8.8.8.8:53", "req-1")
+	handler.collector = NewOrderedResultCollector()
+
+	results := make(chan string, 1)
+	results <- `{"name":"example.com","status":"NOERROR"}`
+	close(results)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	err := handler.WriteResults(results, &wg)
+	wg.Wait()
+
+	if err != nil {
+		t.Fatalf("WriteResults() error = %v", err)
+	}
+
+	entry := GetCache().Get("A", "example.com", "8.8.8.8:53", false)
+	if entry == nil {
+		t.Fatal("expected cached entry")
+	}
+	if entry.Result != `{"name":"example.com","status":"NOERROR"}` {
+		t.Fatalf("cached result = %q", entry.Result)
+	}
+
+	ordered := handler.collector.Ordered([]string{"example.com"})
+	if len(ordered) != 1 || ordered[0] != entry.Result {
+		t.Fatalf("collector output = %#v", ordered)
+	}
+}
+
+func TestOrderedResultCollector_PreservesDuplicates(t *testing.T) {
+	collector := NewOrderedResultCollector()
+	collector.Add("example.com", "first")
+	collector.Add("example.org", "second")
+	collector.Add("example.com", "third")
+
+	ordered := collector.Ordered([]string{"example.com", "example.org", "example.com"})
+	expected := []string{"first", "second", "third"}
+	if len(ordered) != len(expected) {
+		t.Fatalf("len(ordered) = %d, want %d", len(ordered), len(expected))
+	}
+	for i := range expected {
+		if ordered[i] != expected[i] {
+			t.Fatalf("ordered[%d] = %q, want %q", i, ordered[i], expected[i])
+		}
+	}
+}
+
 func TestRunModule_InvalidJSON(t *testing.T) {
 	// Set up minimal global config for testing
 	GC.ApiPort = 8080
@@ -282,6 +335,28 @@ func TestRunModule_MissingQueries(t *testing.T) {
 	resp := w.Result()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() with missing queries status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestRunModule_JSONContentTypeWithCharset(t *testing.T) {
+	GC.ApiPort = 8080
+	GC.ApiIP = "127.0.0.1"
+
+	w := httptest.NewRecorder()
+	body := bytes.NewBufferString(`{"module":"INVALID","queries":["example.com"]}`)
+	r := httptest.NewRequest(http.MethodPost, "/job", body)
+	r.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+	runModule(w, r)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("runModule() status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+
+	respBody := strings.TrimSpace(w.Body.String())
+	if !strings.Contains(respBody, `"code":2007`) {
+		t.Fatalf("expected JSON request parsing, got body %q", respBody)
 	}
 }
 

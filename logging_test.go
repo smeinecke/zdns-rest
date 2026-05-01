@@ -133,6 +133,20 @@ func TestLoggingResponseWriter(t *testing.T) {
 	}
 }
 
+func TestLoggingResponseWriter_ImplementsFlusher(t *testing.T) {
+	lrw := &loggingResponseWriter{
+		ResponseWriter: httptest.NewRecorder(),
+		statusCode:     http.StatusOK,
+	}
+
+	flusher, ok := interface{}(lrw).(http.Flusher)
+	if !ok {
+		t.Fatal("loggingResponseWriter should implement http.Flusher")
+	}
+
+	flusher.Flush()
+}
+
 func TestMetricsMiddleware(t *testing.T) {
 	handler := MetricsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -170,6 +184,20 @@ func TestResponseRecorder(t *testing.T) {
 	if rr.statusCode != http.StatusNotFound {
 		t.Errorf("responseRecorder statusCode after double write = %d, want %d", rr.statusCode, http.StatusNotFound)
 	}
+}
+
+func TestResponseRecorder_ImplementsFlusher(t *testing.T) {
+	rr := &responseRecorder{
+		ResponseWriter: httptest.NewRecorder(),
+		statusCode:     http.StatusOK,
+	}
+
+	flusher, ok := interface{}(rr).(http.Flusher)
+	if !ok {
+		t.Fatal("responseRecorder should implement http.Flusher")
+	}
+
+	flusher.Flush()
 }
 
 func TestRecoverMiddleware(t *testing.T) {

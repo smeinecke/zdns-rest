@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -83,6 +84,25 @@ func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
 		lrw.WriteHeader(http.StatusOK)
 	}
 	return lrw.ResponseWriter.Write(b)
+}
+
+func (lrw *loggingResponseWriter) Flush() {
+	if flusher, ok := lrw.ResponseWriter.(http.Flusher); ok {
+		if !lrw.written {
+			lrw.WriteHeader(http.StatusOK)
+		}
+		flusher.Flush()
+	}
+}
+
+func (lrw *loggingResponseWriter) ReadFrom(r io.Reader) (int64, error) {
+	if rf, ok := lrw.ResponseWriter.(io.ReaderFrom); ok {
+		if !lrw.written {
+			lrw.WriteHeader(http.StatusOK)
+		}
+		return rf.ReadFrom(r)
+	}
+	return io.Copy(lrw.ResponseWriter, r)
 }
 
 // getClientIP extracts the client IP from the request

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -74,7 +75,8 @@ func (e *CacheEntry) IsStale(staleTTL time.Duration) bool {
 type DNSCache struct {
 	mu       sync.RWMutex
 	entries  map[string]*CacheEntry
-	lruList  []string
+	lruList  *list.List
+	lruIndex map[string]*list.Element
 	maxSize  int
 	ttl      time.Duration
 	staleTTL time.Duration
@@ -92,7 +94,8 @@ func NewDNSCache(enabled bool, maxSize int, ttl time.Duration) *DNSCache {
 
 	return &DNSCache{
 		entries:  make(map[string]*CacheEntry),
-		lruList:  make([]string, 0, maxSize),
+		lruList:  list.New(),
+		lruIndex: make(map[string]*list.Element),
 		maxSize:  maxSize,
 		ttl:      ttl,
 		staleTTL: ttl / 2, // Stale window is half of TTL by default
@@ -114,7 +117,7 @@ func generateCacheKey(module, query, nameserver string) string {
 // Get retrieves a cached result. Returns nil if not found or expired.
 // If allowStale is true, may return stale entries.
 func (c *DNSCache) Get(module, query, nameserver string, allowStale bool) *CacheEntry {
-	if !c.enabled || c == nil {
+	if c == nil || !c.enabled {
 		return nil
 	}
 
@@ -157,7 +160,7 @@ func (c *DNSCache) Get(module, query, nameserver string, allowStale bool) *Cache
 
 // Set stores a result in the cache
 func (c *DNSCache) Set(module, query, nameserver, result string) {
-	if !c.enabled || c == nil {
+	if c == nil || !c.enabled {
 		return
 	}
 
@@ -181,19 +184,14 @@ func (c *DNSCache) Set(module, query, nameserver, result string) {
 		Nameserver: nameserver,
 	}
 
-	// If updating existing entry, remove from LRU first
-	if _, exists := c.entries[key]; exists {
-		c.removeFromLRU(key)
-	}
-
 	c.entries[key] = entry
-	c.lruList = append(c.lruList, key)
+	c.updateLRU(key)
 	cacheSize.Set(float64(len(c.entries)))
 }
 
 // Delete removes an entry from the cache
 func (c *DNSCache) Delete(module, query, nameserver string) {
-	if !c.enabled || c == nil {
+	if c == nil || !c.enabled {
 		return
 	}
 
@@ -211,7 +209,7 @@ func (c *DNSCache) Delete(module, query, nameserver string) {
 
 // Clear removes all entries from the cache
 func (c *DNSCache) Clear() {
-	if !c.enabled || c == nil {
+	if c == nil || !c.enabled {
 		return
 	}
 
@@ -219,13 +217,14 @@ func (c *DNSCache) Clear() {
 	defer c.mu.Unlock()
 
 	c.entries = make(map[string]*CacheEntry)
-	c.lruList = make([]string, 0, c.maxSize)
+	c.lruList = list.New()
+	c.lruIndex = make(map[string]*list.Element)
 	cacheSize.Set(0)
 }
 
 // Size returns the current number of entries in the cache
 func (c *DNSCache) Size() int {
-	if !c.enabled || c == nil {
+	if c == nil || !c.enabled {
 		return 0
 	}
 
@@ -236,7 +235,7 @@ func (c *DNSCache) Size() int {
 
 // Stats returns cache statistics
 func (c *DNSCache) Stats() CacheStats {
-	if !c.enabled || c == nil {
+	if c == nil || !c.enabled {
 		return CacheStats{}
 	}
 
@@ -287,36 +286,39 @@ func (s CacheStats) ToJSON() string {
 
 // updateLRU moves the key to the end of the LRU list (most recently used)
 func (c *DNSCache) updateLRU(key string) {
-	c.removeFromLRU(key)
-	c.lruList = append(c.lruList, key)
+	if elem, exists := c.lruIndex[key]; exists {
+		c.lruList.MoveToBack(elem)
+		return
+	}
+	c.lruIndex[key] = c.lruList.PushBack(key)
 }
 
 // removeFromLRU removes a key from the LRU list
 func (c *DNSCache) removeFromLRU(key string) {
-	for i, k := range c.lruList {
-		if k == key {
-			c.lruList = append(c.lruList[:i], c.lruList[i+1:]...)
-			return
-		}
+	if elem, exists := c.lruIndex[key]; exists {
+		c.lruList.Remove(elem)
+		delete(c.lruIndex, key)
 	}
 }
 
 // evictLRU removes the least recently used entry
 func (c *DNSCache) evictLRU() {
-	if len(c.lruList) == 0 {
+	if c.lruList.Len() == 0 {
 		return
 	}
 
 	// Remove oldest entry (first in list)
-	oldestKey := c.lruList[0]
+	oldestElem := c.lruList.Front()
+	oldestKey := oldestElem.Value.(string)
 	delete(c.entries, oldestKey)
-	c.lruList = c.lruList[1:]
+	c.lruList.Remove(oldestElem)
+	delete(c.lruIndex, oldestKey)
 	cacheEvictions.Inc()
 }
 
 // Cleanup removes expired entries from the cache
 func (c *DNSCache) Cleanup() {
-	if !c.enabled || c == nil {
+	if c == nil || !c.enabled {
 		return
 	}
 
@@ -345,7 +347,7 @@ func (c *DNSCache) Cleanup() {
 func (c *DNSCache) StartCleanup(interval time.Duration) chan<- struct{} {
 	stop := make(chan struct{})
 
-	if !c.enabled || c == nil {
+	if c == nil || !c.enabled {
 		return stop
 	}
 
@@ -367,15 +369,27 @@ func (c *DNSCache) StartCleanup(interval time.Duration) chan<- struct{} {
 }
 
 // Global cache instance
-var globalCache *DNSCache
+var (
+	globalCache       *DNSCache
+	globalCacheMu     sync.Mutex
+	globalCacheStopCh chan<- struct{}
+)
 
 // InitCache initializes the global DNS cache
 func InitCache(enabled bool, maxSize int, ttl time.Duration) {
+	globalCacheMu.Lock()
+	defer globalCacheMu.Unlock()
+
+	if globalCacheStopCh != nil {
+		close(globalCacheStopCh)
+		globalCacheStopCh = nil
+	}
+
 	globalCache = NewDNSCache(enabled, maxSize, ttl)
 	if enabled {
 		log.Infof("DNS cache initialized: max_size=%d, ttl=%v", maxSize, ttl)
 		// Start cleanup every minute
-		globalCache.StartCleanup(1 * time.Minute)
+		globalCacheStopCh = globalCache.StartCleanup(1 * time.Minute)
 	} else {
 		log.Info("DNS cache disabled")
 	}

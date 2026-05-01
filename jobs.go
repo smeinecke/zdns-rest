@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,10 +75,9 @@ type Job struct {
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 
 	// Internal fields
-	ctx        context.Context
-	cancel     context.CancelFunc
-	resultChan chan string
-	mu         sync.RWMutex
+	ctx    context.Context
+	cancel context.CancelFunc
+	mu     sync.RWMutex
 }
 
 // JobManager manages async DNS lookup jobs
@@ -180,29 +180,8 @@ func (jm *JobManager) processJob(job *Job) {
 	queries := make([]string, len(job.Queries))
 	copy(queries, job.Queries)
 
-	// Setup input handler
-	input := ""
-	for _, q := range queries {
-		input += q + "\n"
-	}
-	gc.InputHandler = iohandlers.NewStreamInputHandler(&stringReader{s: input})
-
-	// Setup output handler to capture results
 	results := make([]string, 0, len(queries))
-	resultChan := make(chan string, len(queries))
-
-	// Create a goroutine to collect results
-	var resultWg sync.WaitGroup
-	resultWg.Add(1)
-	go func() {
-		defer resultWg.Done()
-		for result := range resultChan {
-			results = append(results, result)
-			job.mu.Lock()
-			job.Progress++
-			job.mu.Unlock()
-		}
-	}()
+	collector := NewOrderedResultCollector()
 
 	// Check for cancellation
 	select {
@@ -244,9 +223,9 @@ func (jm *JobManager) processJob(job *Job) {
 		return
 	}
 
-	// Run lookups (simplified - in production would need proper output handling)
-	// For now, we'll execute lookups directly
-	for i, query := range queries {
+	cache := GetCache()
+	uncachedQueries := make([]string, 0, len(queries))
+	for _, query := range queries {
 		select {
 		case <-job.ctx.Done():
 			job.mu.Lock()
@@ -259,36 +238,39 @@ func (jm *JobManager) processJob(job *Job) {
 		default:
 		}
 
-		// Check cache first
-		cache := GetCache()
 		if cache != nil && cache.enabled {
 			if entry := cache.Get(gc.Module, query, job.Nameserver, false); entry != nil {
-				results = append(results, entry.Result)
+				collector.Add(query, entry.Result)
 				job.mu.Lock()
-				job.Progress = i + 1
+				job.Progress++
 				job.mu.Unlock()
 				continue
 			}
 		}
 
-		// Perform lookup
-		// Note: This is a simplified version. In production, we'd use zdns.DoLookups properly
-		// with proper input/output handlers
-		result := fmt.Sprintf(`{"name":"%s","status":"NOERROR","data":{}}`, query)
-		results = append(results, result)
-
-		// Cache the result
-		if cache != nil && cache.enabled {
-			cache.Set(gc.Module, query, job.Nameserver, result)
-		}
-
-		job.mu.Lock()
-		job.Progress = i + 1
-		job.mu.Unlock()
+		uncachedQueries = append(uncachedQueries, query)
 	}
 
-	close(resultChan)
-	resultWg.Wait()
+	if len(uncachedQueries) > 0 {
+		gc.InputHandler = iohandlers.NewStreamInputHandler(&stringReader{s: buildQueryInput(uncachedQueries)})
+		gc.OutputHandler = &JobOutputHandler{
+			job:        job,
+			module:     gc.Module,
+			nameserver: job.Nameserver,
+			collector:  collector,
+		}
+
+		if err := zdns.DoLookups(factory, &gc); err != nil {
+			job.mu.Lock()
+			job.Status = JobFailed
+			job.Error = fmt.Sprintf("Lookup execution failed: %v", err)
+			now := time.Now()
+			job.CompletedAt = &now
+			job.mu.Unlock()
+			jobsTotal.WithLabelValues("failed").Inc()
+			return
+		}
+	}
 
 	if err := factory.Finalize(); err != nil {
 		log.WithFields(log.Fields{
@@ -296,6 +278,21 @@ func (jm *JobManager) processJob(job *Job) {
 			"error":  err,
 		}).Warn("Factory finalization failed")
 	}
+
+	select {
+	case <-job.ctx.Done():
+		job.mu.Lock()
+		job.Status = JobCancelled
+		now := time.Now()
+		job.CompletedAt = &now
+		job.Results = collector.Ordered(queries)
+		job.mu.Unlock()
+		jobsTotal.WithLabelValues("cancelled").Inc()
+		return
+	default:
+	}
+
+	results = collector.Ordered(queries)
 
 	job.mu.Lock()
 	job.Status = JobCompleted
@@ -312,6 +309,48 @@ func (jm *JobManager) processJob(job *Job) {
 		"count":    len(job.Queries),
 		"duration": time.Since(startTime),
 	}).Info("Job completed")
+}
+
+type JobOutputHandler struct {
+	job        *Job
+	module     string
+	nameserver string
+	collector  *OrderedResultCollector
+}
+
+func (h *JobOutputHandler) WriteResults(results <-chan string, wg *sync.WaitGroup) error {
+	defer wg.Done()
+
+	cache := GetCache()
+	for result := range results {
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(result), &decoded); err == nil {
+			if name, ok := decoded["name"].(string); ok && h.collector != nil {
+				h.collector.Add(name, result)
+			}
+		}
+
+		if cache != nil && cache.enabled {
+			if name, ok := decoded["name"].(string); ok {
+				cache.Set(h.module, name, h.nameserver, result)
+			}
+		}
+
+		h.job.mu.Lock()
+		h.job.Progress++
+		h.job.mu.Unlock()
+	}
+
+	return nil
+}
+
+func buildQueryInput(queries []string) string {
+	var input strings.Builder
+	for _, q := range queries {
+		input.WriteString(q)
+		input.WriteByte('\n')
+	}
+	return input.String()
 }
 
 // stringReader is a simple string reader for input
@@ -605,17 +644,32 @@ func getJobResultsRequest(w http.ResponseWriter, r *http.Request) {
 
 	results, err := jobManager.GetJobResults(jobID)
 	if err != nil {
-		// Check if job exists but is not complete
-		status, progress, total, _ := jobManager.GetJobStatus(jobID)
-		if status != "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"status":   status,
-				"progress": progress,
-				"total":    total,
-				"message":  "Job is still processing",
-			})
+		job := jobManager.GetJob(jobID)
+		if job != nil {
+			job.mu.RLock()
+			status := job.Status
+			progress := job.Progress
+			total := job.Total
+			jobErr := job.Error
+			job.mu.RUnlock()
+
+			if status == JobPending || status == JobRunning {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"status":   status,
+					"progress": progress,
+					"total":    total,
+					"message":  "Job is still processing",
+				})
+				return
+			}
+
+			detail := string(status)
+			if jobErr != "" {
+				detail = jobErr
+			}
+			ErrorResponse(w, ErrorCode{Code: 2003, Message: "Job processing error", HTTPStatus: http.StatusBadRequest}, detail)
 			return
 		}
 		ErrorResponse(w, ErrorCode{Code: 2004, Message: "Job not found", HTTPStatus: http.StatusNotFound}, "")
