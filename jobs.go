@@ -229,7 +229,9 @@ func (jm *JobManager) processJob(job *Job) {
 		return
 	}
 
-	factory.SetFlags(GC.Flags)
+	if GC.Flags != nil {
+		factory.SetFlags(GC.Flags)
+	}
 
 	if err := factory.Initialize(&gc); err != nil {
 		job.mu.Lock()
