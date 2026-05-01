@@ -20,7 +20,7 @@ All flags can be provided via command line, environment variables, or a config f
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--bind-ip` | IP to bind API to | `` (all interfaces) |
+| `--bind-ip` | IP to bind API to | `::` (all interfaces) |
 | `--bind-port` | Port to bind API to | `8080` |
 | `--iterative` | Perform own iteration instead of using recursive resolver | `false` |
 | `--name-servers` | Comma-separated list or `@/path/to/file` | System default |
