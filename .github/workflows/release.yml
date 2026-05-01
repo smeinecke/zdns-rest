@@ -65,28 +65,11 @@ jobs:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
     needs: build-binaries
+    if: github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v')
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
-
-      - name: Download linux/amd64 binary
-        uses: actions/download-artifact@v4
-        with:
-          name: zdns-rest-linux-amd64
-          path: prebuilt/
-
-      - name: Download linux/arm64 binary
-        uses: actions/download-artifact@v4
-        with:
-          name: zdns-rest-linux-arm64
-          path: prebuilt/
-
-      - name: Rename binaries for Docker
-        run: |
-          mv prebuilt/zdns-rest-linux-amd64 prebuilt/zdns-rest-linux-amd64 2>/dev/null || true
-          mv prebuilt/zdns-rest-linux-arm64 prebuilt/zdns-rest-linux-arm64 2>/dev/null || true
-          ls -la prebuilt/
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -126,6 +109,7 @@ jobs:
     name: Upload Release Assets
     runs-on: ubuntu-latest
     needs: build-binaries
+    if: github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v')
     steps:
       - name: Download all binaries
         uses: actions/download-artifact@v4
