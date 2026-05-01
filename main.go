@@ -57,6 +57,12 @@ type GlobalConf struct {
 	CircuitBreakerEnabled  bool
 	CircuitBreakerFailures int
 	CircuitBreakerTimeout  int // seconds
+
+	// Cache
+	CacheEnabled  bool
+	CacheTTL      int // seconds
+	CacheMaxSize  int
+	CacheStaleTTL int // seconds
 }
 
 type ArgumentsConf struct {
@@ -342,6 +348,12 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&GC.CircuitBreakerEnabled, "circuit-breaker", false, "enable circuit breaker for DNS lookups")
 	rootCmd.PersistentFlags().IntVar(&GC.CircuitBreakerFailures, "circuit-breaker-failures", 5, "circuit breaker failure threshold")
 	rootCmd.PersistentFlags().IntVar(&GC.CircuitBreakerTimeout, "circuit-breaker-timeout", 60, "circuit breaker timeout in seconds")
+
+	// Cache flags
+	rootCmd.PersistentFlags().BoolVar(&GC.CacheEnabled, "cache-enabled", true, "enable in-memory DNS result cache")
+	rootCmd.PersistentFlags().IntVar(&GC.CacheTTL, "cache-ttl", 300, "cache TTL in seconds (default 5 minutes)")
+	rootCmd.PersistentFlags().IntVar(&GC.CacheMaxSize, "cache-max-size", 10000, "maximum number of items in cache")
+	rootCmd.PersistentFlags().IntVar(&GC.CacheStaleTTL, "cache-stale-ttl", 150, "stale TTL in seconds (default 2.5 minutes)")
 
 	rootCmd.PersistentFlags().IntVar(&GC.Verbosity, "verbosity", 4, "log verbosity: 1 (lowest)--5 (highest)")
 	rootCmd.PersistentFlags().IntVar(&GC.Retries, "retries", 1, "how many times should zdns retry query if timeout or temporary failure")

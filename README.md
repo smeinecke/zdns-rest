@@ -30,12 +30,21 @@ All flags can be provided via command line, environment variables, or a config f
 | `--tcp-only` | Only perform lookups over TCP | `false` |
 | `--udp-only` | Only perform lookups over UDP | `false` |
 | `--class` | DNS class (INET, CSNET, CHAOS, HESIOD, NONE, ANY) | `INET` |
+| `--cache-enabled` | Enable DNS result caching | `true` |
+| `--cache-ttl` | Cache TTL in seconds | `300` |
+| `--cache-max-size` | Maximum cache entries | `10000` |
+| `--cache-stale-ttl` | Stale entry TTL on error | `150` |
+| `--circuit-breaker` | Enable circuit breaker | `false` |
+| `--circuit-breaker-failures` | Circuit breaker threshold | `5` |
+| `--circuit-breaker-timeout` | Circuit breaker timeout (seconds) | `60` |
 
 Environment variables use `ZDNS_` prefix with uppercase and underscores, e.g. `ZDNS_BIND_PORT=9090`.
 
 ## Features
 
 - **REST API** for high-speed DNS lookups
+- **DNS Result Cache** with TTL and stale-on-error support
+- **Async/Batch Job Processing** via background workers
 - **Prometheus metrics** (`/metrics`)
 - **Rate limiting** per IP address
 - **API key authentication** (optional)
@@ -49,7 +58,9 @@ Environment variables use `ZDNS_` prefix with uppercase and underscores, e.g. `Z
 ## API Documentation
 
 See [API.md](API.md) for full API documentation including:
-- All endpoints (`/job`, `/job/{lookup}`, `/ping`, `/health`, `/ready`, `/metrics`)
+- All endpoints (`/job`, `/job/{lookup}`, `/jobs`, `/ping`, `/health`, `/ready`, `/metrics`)
+- Async batch job processing
+- DNS result caching
 - Authentication methods
 - Rate limiting headers
 - Error codes and response formats

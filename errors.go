@@ -34,6 +34,10 @@ var (
 	ErrFactoryInit     = ErrorCode{Code: 2401, Message: "Factory was unable to initialize", HTTPStatus: http.StatusInternalServerError}
 	ErrRunLookups      = ErrorCode{Code: 2402, Message: "Unable to run lookups", HTTPStatus: http.StatusInternalServerError}
 	ErrFactoryFinalize = ErrorCode{Code: 2403, Message: "Factory was unable to finalize", HTTPStatus: http.StatusInternalServerError}
+
+	// Job errors
+	ErrJobNotFound   = ErrorCode{Code: 2004, Message: "Job not found", HTTPStatus: http.StatusNotFound}
+	ErrJobProcessing = ErrorCode{Code: 2003, Message: "Job processing error", HTTPStatus: http.StatusBadRequest}
 )
 
 // ErrorResponse generates a JSON error response with the proper HTTP status code

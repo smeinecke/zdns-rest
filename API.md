@@ -382,3 +382,175 @@ When pprof is enabled (`--enable-pprof`), profiling endpoints are available on a
 curl http://localhost:6060/debug/pprof/heap > heap.pprof
 go tool pprof heap.pprof
 ```
+
+---
+
+## Async/Batch Job Processing
+
+The API supports asynchronous DNS lookups via the `/jobs` endpoints. Jobs are processed by a background worker pool, allowing clients to submit large batches without blocking.
+
+### POST /jobs
+
+Create a new async DNS lookup job.
+
+- **Auth Required**: Yes (if enabled)
+- **Rate Limited**: Yes (if enabled)
+- **Content-Type**: `application/json`
+
+**Request Body:**
+```json
+{
+  "module": "A",
+  "queries": ["example.com", "example.org", "example.net"]
+}
+```
+
+**Response (202 Accepted):**
+```json
+{
+  "job_id": "job-1640995200-1",
+  "status": "pending",
+  "created_at": "2026-01-01T00:00:00Z"
+}
+```
+
+---
+
+### GET /jobs/{job_id}
+
+Get the status of a job.
+
+- **Auth Required**: Yes (if enabled)
+- **Rate Limited**: Yes (if enabled)
+
+**Response:**
+```json
+{
+  "id": "job-1640995200-1",
+  "status": "running",
+  "module": "A",
+  "total": 3,
+  "progress": 2,
+  "created_at": "2026-01-01T00:00:00Z",
+  "started_at": "2026-01-01T00:00:01Z"
+}
+```
+
+**Status Values:**
+| Status | Description |
+|--------|-------------|
+| `pending` | Job is queued, waiting for a worker |
+| `running` | Job is being processed |
+| `completed` | All lookups finished successfully |
+| `failed` | Job failed due to error |
+| `cancelled` | Job was cancelled |
+
+---
+
+### GET /jobs/{job_id}/results
+
+Get the results of a completed job (NDJSON format).
+
+- **Auth Required**: Yes (if enabled)
+- **Rate Limited**: Yes (if enabled)
+- **Content-Type**: `application/x-ndjson`
+
+**Response (if completed):**
+```ndjson
+{"name":"example.com","status":"NOERROR","data":{"answers":[{"answer":"93.184.216.34","type":"A"}]}}
+{"name":"example.org","status":"NOERROR","data":{"answers":[{"answer":"93.184.216.34","type":"A"}]}}
+{"name":"example.net","status":"NOERROR","data":{"answers":[{"answer":"93.184.216.34","type":"A"}]}}
+```
+
+**Response (if still processing - 202 Accepted):**
+```json
+{
+  "status": "running",
+  "progress": 2,
+  "total": 3,
+  "message": "Job is still processing"
+}
+```
+
+---
+
+### DELETE /jobs/{job_id}
+
+Cancel a pending or running job.
+
+- **Auth Required**: Yes (if enabled)
+- **Rate Limited**: Yes (if enabled)
+
+**Response:**
+```json
+{
+  "code": 1000,
+  "message": "Job cancelled"
+}
+```
+
+---
+
+## DNS Result Cache
+
+The API includes an in-memory cache for DNS lookup results to improve performance and reduce load on upstream DNS servers.
+
+**Cache Features:**
+- **TTL-based expiration**: Cached entries expire after configured TTL (default: 5 minutes)
+- **Stale-on-error**: If upstream DNS fails, stale cached results may be served
+- **LRU eviction**: When cache reaches max size, least recently used entries are evicted
+- **Per-key caching**: Cache keys include (module, query, nameserver) for precise invalidation
+
+**Configuration:**
+- `--cache-enabled`: Enable/disable caching (default: true)
+- `--cache-ttl`: Cache TTL in seconds (default: 300)
+- `--cache-max-size`: Maximum number of cached entries (default: 10000)
+- `--cache-stale-ttl`: How long to serve stale entries on error (default: 150)
+
+**Cache Metrics:**
+| Metric | Description |
+|--------|-------------|
+| `zdns_cache_hits_total` | Total cache hits |
+| `zdns_cache_misses_total` | Total cache misses |
+| `zdns_cache_evictions_total` | Total LRU evictions |
+| `zdns_cache_size` | Current number of cached entries |
+
+---
+
+## Job Metrics
+
+When async job processing is enabled, the following Prometheus metrics are available:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `zdns_jobs_total` | Counter | Total jobs created (label: status) |
+| `zdns_job_duration_seconds` | Histogram | Job processing duration |
+| `zdns_jobs_active` | Gauge | Currently running jobs |
+
+---
+
+## Example: Async Job Workflow
+
+```bash
+# 1. Submit a job
+JOB_RESPONSE=$(curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"module": "A", "queries": ["google.com", "cloudflare.com", "github.com"]}' \
+  http://localhost:8080/jobs)
+
+JOB_ID=$(echo $JOB_RESPONSE | jq -r '.job_id')
+echo "Job ID: $JOB_ID"
+
+# 2. Poll for completion
+while true; do
+  STATUS=$(curl -s http://localhost:8080/jobs/$JOB_ID | jq -r '.status')
+  echo "Status: $STATUS"
+  if [ "$STATUS" = "completed" ]; then
+    break
+  fi
+  sleep 1
+done
+
+# 3. Get results
+curl http://localhost:8080/jobs/$JOB_ID/results
+```

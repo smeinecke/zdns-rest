@@ -55,6 +55,60 @@ func (h *StreamOutputHandler) WriteResults(results <-chan string, wg *sync.WaitG
 	return nil
 }
 
+// CachedStreamOutputHandler wraps StreamOutputHandler with caching
+type CachedStreamOutputHandler struct {
+	*StreamOutputHandler
+	module     string
+	nameserver string
+	requestID  string
+	mu         sync.Mutex
+}
+
+// NewCachedStreamOutputHandler creates a new caching-aware output handler
+func NewCachedStreamOutputHandler(w http.ResponseWriter, module, nameserver, requestID string) *CachedStreamOutputHandler {
+	return &CachedStreamOutputHandler{
+		StreamOutputHandler: NewStreamOutputHandler(w),
+		module:              module,
+		nameserver:          nameserver,
+		requestID:           requestID,
+	}
+}
+
+// WriteResultsWithCache writes results and caches them
+func (h *CachedStreamOutputHandler) WriteResultsWithCache(results <-chan string, wg *sync.WaitGroup) error {
+	defer (*wg).Done()
+
+	cache := GetCache()
+
+	for n := range results {
+		// Write to response
+		if _, err := h.writer.Write([]byte(n + "\n")); err != nil {
+			return err
+		}
+
+		// Cache the result if caching is enabled
+		if cache != nil && cache.enabled {
+			// Parse the result to extract domain name
+			var result map[string]interface{}
+			if err := json.Unmarshal([]byte(n), &result); err == nil {
+				if name, ok := result["name"].(string); ok {
+					cache.Set(h.module, name, h.nameserver, n)
+					log.WithFields(log.Fields{
+						"request_id": h.requestID,
+						"module":     h.module,
+						"domain":     name,
+					}).Debug("Cached DNS result")
+				}
+			}
+		}
+	}
+
+	if f, ok := h.writer.(http.Flusher); ok {
+		f.Flush()
+	}
+	return nil
+}
+
 // domainRegex validates RFC 1123 hostnames
 var domainRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.?$`)
 
@@ -253,9 +307,12 @@ var circuitBreaker *CircuitBreaker
 // runModule is the main handler function for the API server. It handles both form encoded
 // and JSON encoded requests. It extracts the lookup type from the URL or the request
 // body, and then runs the lookup using the zdns library.
+// It also integrates with the DNS cache for improved performance.
 func runModule(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	w.Header().Set("Content-Type", "application/x-ndjson")
+	requestID := w.Header().Get(RequestIDHeader)
+
 	var dr DNSRequests
 	var gc zdns.GlobalConf
 	if err := copier.Copy(&gc, &GC); err != nil {
@@ -263,8 +320,9 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// setup i/o
-	gc.OutputHandler = NewStreamOutputHandler(w)
+	// Determine module and collect queries
+	var queries []string
+	var module string
 
 	req_content_type := r.Header.Get("Content-Type")
 	if req_content_type == "application/json" {
@@ -283,6 +341,7 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 		if dr.Module == "" {
 			dr.Module = "A"
 		}
+		module = dr.Module
 
 		if len(dr.Queries) < 1 {
 			ErrorResponse(w, ErrEmptyQueries, "")
@@ -302,19 +361,32 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		t := strings.NewReader(strings.Join(dr.Queries, "\n"))
-		gc.InputHandler = iohandlers.NewStreamInputHandler(t)
+		queries = dr.Queries
 	} else {
 		if val, ok := vars["lookup"]; ok {
-			dr.Module = val
+			module = val
 		} else {
-			dr.Module = "A"
+			module = "A"
 		}
 
-		gc.InputHandler = iohandlers.NewStreamInputHandler(r.Body)
+		// Read body for plain text queries
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			ErrorResponse(w, ErrReadRequest, err.Error())
+			return
+		}
+
+		// Parse lines
+		lines := strings.Split(string(body), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && validateDomain(line) {
+				queries = append(queries, line)
+			}
+		}
 	}
 
-	gc.Module = strings.ToUpper(dr.Module)
+	gc.Module = strings.ToUpper(module)
 	factory := zdns.GetLookup(gc.Module)
 	if factory == nil {
 		ErrorResponse(w, ErrInvalidModule, gc.Module)
@@ -326,6 +398,56 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 		ErrorResponse(w, ErrCircuitBreakerOpen, "")
 		return
 	}
+
+	// Get cache and nameserver for cache key
+	cache := GetCache()
+	nameserver := ""
+	if len(GC.NameServers) > 0 {
+		nameserver = GC.NameServers[0]
+	}
+
+	// Check cache for queries and collect uncached ones
+	var uncachedQueries []string
+	cacheHits := make(map[string]string)
+
+	if cache != nil && cache.enabled {
+		for _, query := range queries {
+			if entry := cache.Get(gc.Module, query, nameserver, true); entry != nil {
+				cacheHits[query] = entry.Result
+				log.WithFields(log.Fields{
+					"request_id": requestID,
+					"module":     gc.Module,
+					"domain":     query,
+				}).Debug("Cache hit")
+			} else {
+				uncachedQueries = append(uncachedQueries, query)
+			}
+		}
+	} else {
+		uncachedQueries = queries
+	}
+
+	// Write cached results immediately
+	for _, result := range cacheHits {
+		w.Write([]byte(result + "\n"))
+	}
+
+	// If all queries were cached, we're done
+	if len(uncachedQueries) == 0 {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		return
+	}
+
+	// Setup i/o for uncached queries
+	t := strings.NewReader(strings.Join(uncachedQueries, "\n"))
+	gc.InputHandler = iohandlers.NewStreamInputHandler(t)
+
+	// Use caching output handler
+	cachedHandler := NewCachedStreamOutputHandler(w, gc.Module, nameserver, requestID)
+	gc.OutputHandler = cachedHandler.StreamOutputHandler
+
 	factory.SetFlags(GC.Flags)
 
 	// allow the factory to initialize itself
@@ -333,7 +455,24 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 		if GC.CircuitBreakerEnabled {
 			circuitBreaker.RecordFailure()
 		}
-		ErrorResponse(w, ErrFactoryInit, err.Error())
+		// Try to serve stale cache entries on error
+		servedStale := false
+		if cache != nil && cache.enabled {
+			for _, query := range uncachedQueries {
+				if entry := cache.Get(gc.Module, query, nameserver, true); entry != nil {
+					w.Write([]byte(entry.Result + "\n"))
+					servedStale = true
+					log.WithFields(log.Fields{
+						"request_id": requestID,
+						"module":     gc.Module,
+						"domain":     query,
+					}).Warn("Served stale cache entry due to lookup error")
+				}
+			}
+		}
+		if !servedStale {
+			ErrorResponse(w, ErrFactoryInit, err.Error())
+		}
 		return
 	}
 
@@ -342,7 +481,24 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 		if GC.CircuitBreakerEnabled {
 			circuitBreaker.RecordFailure()
 		}
-		ErrorResponse(w, ErrRunLookups, err.Error())
+		// Try to serve stale cache entries on error
+		servedStale := false
+		if cache != nil && cache.enabled {
+			for _, query := range uncachedQueries {
+				if entry := cache.Get(gc.Module, query, nameserver, true); entry != nil {
+					w.Write([]byte(entry.Result + "\n"))
+					servedStale = true
+					log.WithFields(log.Fields{
+						"request_id": requestID,
+						"module":     gc.Module,
+						"domain":     query,
+					}).Warn("Served stale cache entry due to lookup error")
+				}
+			}
+		}
+		if !servedStale {
+			ErrorResponse(w, ErrRunLookups, err.Error())
+		}
 		return
 	}
 
@@ -374,10 +530,27 @@ func startServer() {
 		log.Infof("Circuit breaker enabled: threshold=%d, timeout=%ds", GC.CircuitBreakerFailures, GC.CircuitBreakerTimeout)
 	}
 
+	// Initialize DNS cache
+	InitCache(GC.CacheEnabled, GC.CacheMaxSize, time.Duration(GC.CacheTTL)*time.Second)
+	if GC.CacheEnabled {
+		globalCache.staleTTL = time.Duration(GC.CacheStaleTTL) * time.Second
+	}
+
+	// Initialize job manager
+	InitJobManager(10)
+
 	// Setup routes
 	r := mux.NewRouter().StrictSlash(true)
 	r.HandleFunc("/job/{lookup}", runModule).Methods("POST")
 	r.HandleFunc("/job", runModule).Methods("POST")
+
+	// Async job routes
+	r.HandleFunc("/jobs", createJobRequest).Methods("POST")
+	r.HandleFunc("/jobs", listJobsRequest).Methods("GET")
+	r.HandleFunc("/jobs/{job_id}", getJobRequest).Methods("GET")
+	r.HandleFunc("/jobs/{job_id}/results", getJobResultsRequest).Methods("GET")
+	r.HandleFunc("/jobs/{job_id}", cancelJobRequest).Methods("DELETE")
+
 	r.HandleFunc("/ping", pingRequest)
 	r.HandleFunc("/health", healthRequest)
 	r.HandleFunc("/ready", readyRequest)
