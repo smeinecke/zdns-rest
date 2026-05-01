@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoggingMiddleware(t *testing.T) {
@@ -233,5 +234,36 @@ func TestRecoverMiddleware_NoPanic(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("RecoverMiddleware no panic: got status %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+func TestLogDNSLookup(t *testing.T) {
+	// Should not panic
+	LogDNSLookup("req-123", "A", "example.com", "NOERROR", 100*time.Millisecond)
+	LogDNSLookup("req-456", "MX", "example.org", "NXDOMAIN", 50*time.Millisecond)
+}
+
+func TestLoggingResponseWriter_ReadFrom(t *testing.T) {
+	w := httptest.NewRecorder()
+	lrw := &loggingResponseWriter{
+		ResponseWriter: w,
+		statusCode:     http.StatusOK,
+		requestID:      "test-id",
+	}
+
+	// ReadFrom on httptest.ResponseRecorder should fall through to io.Copy
+	src := strings.NewReader("streamed data")
+	n, err := lrw.ReadFrom(src)
+	if err != nil {
+		t.Fatalf("ReadFrom error: %v", err)
+	}
+	if n != int64(len("streamed data")) {
+		t.Errorf("ReadFrom n = %d, want %d", n, len("streamed data"))
+	}
+	if w.Body.String() != "streamed data" {
+		t.Errorf("ReadFrom body = %q, want %q", w.Body.String(), "streamed data")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("ReadFrom status = %d, want %d", w.Code, http.StatusOK)
 	}
 }
