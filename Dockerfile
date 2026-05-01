@@ -1,4 +1,6 @@
-# Build stage
+# syntax=docker/dockerfile:1
+
+# Build stage (fallback when no prebuilt binary)
 FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
@@ -23,8 +25,22 @@ RUN apk --no-cache add ca-certificates
 
 WORKDIR /root/
 
-# Copy binary from builder
-COPY --from=builder /app/zdns-rest .
+ARG TARGETARCH
+
+# Copy builder binary as fallback
+COPY --from=builder /app/zdns-rest /root/zdns-rest-builder
+
+# Copy prebuilt binary if available (from CI)
+COPY prebuilt/zdns-rest-linux-${TARGETARCH} /root/zdns-rest-prebuilt 2>/dev/null || true
+
+# Use prebuilt if available, otherwise builder output
+RUN if [ -f /root/zdns-rest-prebuilt ]; then \
+        mv /root/zdns-rest-prebuilt /root/zdns-rest; \
+    else \
+        mv /root/zdns-rest-builder /root/zdns-rest; \
+    fi && \
+    chmod +x /root/zdns-rest && \
+    rm -f /root/zdns-rest-builder /root/zdns-rest-prebuilt
 
 # Expose default port
 EXPOSE 8080
