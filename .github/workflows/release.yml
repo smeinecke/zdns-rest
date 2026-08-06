@@ -75,7 +75,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.25"
 
       - name: Build binary
         env:
@@ -121,6 +121,7 @@ jobs:
         shell: bash
         run: |
           TAGS=(
+            "ghcr.io/${{ github.repository }}:latest"
             "ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.tag }}"
             "ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.version }}"
           )
@@ -201,6 +202,7 @@ jobs:
         shell: bash
         run: |
           TAGS=(
+            "ghcr.io/${{ github.repository }}:latest"
             "ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.tag }}"
             "ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.version }}"
           )
