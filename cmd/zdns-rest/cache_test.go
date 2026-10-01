@@ -67,12 +67,9 @@ func TestDNSCache_NilReceiver(t *testing.T) {
 	assert.Nil(t, cache.Get("A", "example.com", "8.8.8.8:53", false))
 	assert.NotPanics(t, func() {
 		cache.Set("A", "example.com", "8.8.8.8:53", "value")
-		cache.Delete("A", "example.com", "8.8.8.8:53")
-		cache.Clear()
 		cache.Cleanup()
 	})
 	assert.Equal(t, 0, cache.Size())
-	assert.Equal(t, CacheStats{}, cache.Stats())
 
 	stop := cache.StartCleanup(time.Millisecond)
 	assert.NotNil(t, stop)
@@ -335,56 +332,6 @@ func TestDNSCacheUpdateExistingDoesNotDuplicateLRU(t *testing.T) {
 	assert.Equal(t, `{"result":"2"}`, entry.Result)
 }
 
-func TestDNSCacheDelete(t *testing.T) {
-	cache := NewDNSCache(true, 100, time.Hour)
-
-	cache.Set("A", "example.com", "8.8.8.8:53", `{"result": "success"}`)
-	assert.Equal(t, 1, cache.Size())
-
-	cache.Delete("A", "example.com", "8.8.8.8:53")
-	assert.Equal(t, 0, cache.Size())
-
-	entry := cache.Get("A", "example.com", "8.8.8.8:53", false)
-	assert.Nil(t, entry)
-}
-
-func TestDNSCacheClear(t *testing.T) {
-	cache := NewDNSCache(true, 100, time.Hour)
-
-	cache.Set("A", "domain1.com", "8.8.8.8:53", `{"result": "1"}`)
-	cache.Set("A", "domain2.com", "8.8.8.8:53", `{"result": "2"}`)
-	cache.Set("MX", "domain3.com", "8.8.8.8:53", `{"result": "3"}`)
-
-	assert.Equal(t, 3, cache.Size())
-
-	cache.Clear()
-
-	assert.Equal(t, 0, cache.Size())
-	assert.Nil(t, cache.Get("A", "domain1.com", "8.8.8.8:53", false))
-	assert.Nil(t, cache.Get("A", "domain2.com", "8.8.8.8:53", false))
-	assert.Nil(t, cache.Get("MX", "domain3.com", "8.8.8.8:53", false))
-}
-
-func TestDNSCacheStats(t *testing.T) {
-	cache := NewDNSCache(true, 100, time.Hour)
-
-	// Empty cache stats
-	stats := cache.Stats()
-	assert.Equal(t, 0, stats.Size)
-	assert.Equal(t, 0, stats.Fresh)
-	assert.Equal(t, 100, stats.MaxSize)
-	assert.Equal(t, time.Hour, stats.TTL)
-
-	// Add entries
-	cache.Set("A", "fresh.com", "8.8.8.8:53", `{"result": "1"}`)
-
-	stats = cache.Stats()
-	assert.Equal(t, 1, stats.Size)
-	assert.Equal(t, 1, stats.Fresh)
-	assert.Equal(t, 0, stats.Stale)
-	assert.Equal(t, 0, stats.Expired)
-}
-
 func TestDNSCacheCleanup(t *testing.T) {
 	cache := NewDNSCache(true, 100, 100*time.Millisecond)
 	cache.staleTTL = 50 * time.Millisecond
@@ -419,9 +366,6 @@ func TestDisabledCache(t *testing.T) {
 	assert.Nil(t, entry)
 
 	assert.Equal(t, 0, cache.Size())
-
-	stats := cache.Stats()
-	assert.Equal(t, 0, stats.Size)
 }
 
 func TestInitCacheReinitialization(t *testing.T) {
@@ -444,21 +388,36 @@ func TestInitCacheReinitialization(t *testing.T) {
 	assert.Equal(t, time.Second, third.ttl)
 }
 
-func TestCacheStatsToJSON(t *testing.T) {
-	stats := CacheStats{
-		Size:     10,
-		Fresh:    8,
-		Stale:    1,
-		Expired:  1,
-		MaxSize:  100,
-		TTL:      time.Minute,
-		StaleTTL: 30 * time.Second,
+func TestDNSCacheSetStaleTTL(t *testing.T) {
+	c := NewDNSCache(true, 100, time.Minute)
+	c.SetStaleTTL(42 * time.Second)
+
+	c.mu.RLock()
+	got := c.staleTTL
+	c.mu.RUnlock()
+	if got != 42*time.Second {
+		t.Errorf("staleTTL = %v, want 42s", got)
 	}
 
-	json := stats.ToJSON()
-	assert.Contains(t, json, `"size":10`)
-	assert.Contains(t, json, `"fresh":8`)
-	assert.Contains(t, json, `"stale":1`)
-	assert.Contains(t, json, `"expired":1`)
-	assert.Contains(t, json, `"max_size":100`)
+	// nil receiver must not panic
+	var nilCache *DNSCache
+	nilCache.SetStaleTTL(time.Second)
+}
+
+func TestIsCacheableStatus(t *testing.T) {
+	cacheable := []string{"NOERROR", "NXDOMAIN", "NODATA", "NORECORD", "NO_ANSWER"}
+	uncacheable := []string{"SERVFAIL", "TIMEOUT", "ITERATIVE_TIMEOUT", "TEMPORARY",
+		"ERROR", "REFUSED", "AUTHFAIL", "FORMERR", "NOT_IMPL", "TRUNCATED",
+		"BLACKLIST", "NO_OUTPUT", "ILLEGAL_INPUT", "NOAUTH", ""}
+
+	for _, s := range cacheable {
+		if !isCacheableStatus(s) {
+			t.Errorf("isCacheableStatus(%q) = false, want true", s)
+		}
+	}
+	for _, s := range uncacheable {
+		if isCacheableStatus(s) {
+			t.Errorf("isCacheableStatus(%q) = true, want false", s)
+		}
+	}
 }

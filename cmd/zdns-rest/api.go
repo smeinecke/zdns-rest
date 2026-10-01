@@ -3,105 +3,49 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
+	_ "net/http/pprof" //nolint:gosec // G108: pprof endpoint is opt-in via --enable-pprof
 	"os"
 	"os/signal"
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/jinzhu/copier"
 	log "github.com/sirupsen/logrus"
-	"github.com/zmap/zdns/iohandlers"
-	"github.com/zmap/zdns/pkg/zdns"
 )
 
-type StreamOutputHandler struct {
-	writer http.ResponseWriter
-}
-
-// NewStreamOutputHandler returns a new StreamOutputHandler that will write results to the given http.ResponseWriter.
-func NewStreamOutputHandler(w http.ResponseWriter) *StreamOutputHandler {
-	return &StreamOutputHandler{
-		writer: w,
+// validateLookupParams normalizes and validates the module name and query
+// count shared by the sync and async lookup endpoints. It writes the error
+// response itself and returns ok=false on failure.
+func (s *Server) validateLookupParams(w http.ResponseWriter, module string, numQueries int) (string, bool) {
+	if numQueries < 1 {
+		ErrorResponse(w, ErrEmptyQueries, "")
+		return "", false
 	}
-}
-
-// WriteResults takes a channel of strings and writes them to the embedded http.ResponseWriter.
-// The WaitGroup is used to signal when the write operation is complete. The function will block until the
-// channel is closed. If the http.ResponseWriter implements the http.Flusher interface, WriteResults will
-// call Flush() after writing all the results in order to ensure that the writes are sent to the client as
-// soon as possible.
-func (h *StreamOutputHandler) WriteResults(results <-chan string, wg *sync.WaitGroup) error {
-	defer (*wg).Done()
-	for n := range results {
-		if _, err := h.writer.Write([]byte(n + "\n")); err != nil {
-			return err
-		}
+	if numQueries > s.cfg.MaxQueriesPerReq {
+		ErrorResponse(w, ErrTooManyQueries, fmt.Sprintf("Maximum allowed: %d", s.cfg.MaxQueriesPerReq))
+		return "", false
 	}
-
-	if f, ok := h.writer.(http.Flusher); ok {
-		f.Flush()
+	if module == "" {
+		module = "A"
 	}
-	return nil
-}
-
-// CachedStreamOutputHandler wraps StreamOutputHandler with caching
-type CachedStreamOutputHandler struct {
-	module     string
-	nameserver string
-	requestID  string
-	collector  *OrderedResultCollector
-}
-
-// NewCachedStreamOutputHandler creates a new caching-aware output handler
-func NewCachedStreamOutputHandler(module, nameserver, requestID string) *CachedStreamOutputHandler {
-	return &CachedStreamOutputHandler{
-		module:     module,
-		nameserver: nameserver,
-		requestID:  requestID,
-		collector:  nil,
+	module = strings.ToUpper(module)
+	if _, ok := s.engine.modules[module]; !ok {
+		ErrorResponse(w, ErrInvalidModule, module)
+		return "", false
 	}
-}
-
-// WriteResults writes results to the response stream and stores them in cache.
-func (h *CachedStreamOutputHandler) WriteResults(results <-chan string, wg *sync.WaitGroup) error {
-	defer (*wg).Done()
-
-	cache := GetCache()
-
-	for n := range results {
-		var result map[string]interface{}
-		if err := json.Unmarshal([]byte(n), &result); err == nil {
-			if name, ok := result["name"].(string); ok && h.collector != nil {
-				h.collector.Add(name, n)
-			}
-		}
-
-		// Cache the result if caching is enabled
-		if cache != nil && cache.enabled {
-			if name, ok := result["name"].(string); ok {
-				cache.Set(h.module, name, h.nameserver, n)
-				log.WithFields(log.Fields{
-					"request_id": h.requestID,
-					"module":     h.module,
-					"domain":     name,
-				}).Debug("Cached DNS result")
-			}
-		}
-	}
-
-	return nil
+	return module, true
 }
 
 type OrderedResultCollector struct {
@@ -119,6 +63,17 @@ func (c *OrderedResultCollector) Add(query, result string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.results[query] = append(c.results[query], result)
+}
+
+// Pop removes and returns the next buffered result for the given query.
+func (c *OrderedResultCollector) Pop(query string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if queue := c.results[query]; len(queue) > 0 {
+		c.results[query] = queue[1:]
+		return queue[0], true
+	}
+	return "", false
 }
 
 func (c *OrderedResultCollector) Ordered(queries []string) []string {
@@ -140,18 +95,21 @@ var domainRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9]
 
 // RateLimiter implements a simple token bucket rate limiter per IP
 type RateLimiter struct {
-	mu       sync.RWMutex
-	requests map[string][]time.Time
-	limit    int
-	window   time.Duration
+	mu         sync.Mutex
+	requests   map[string][]time.Time
+	limit      int
+	window     time.Duration
+	calls      int
+	sweepEvery int
 }
 
 // NewRateLimiter creates a new rate limiter with the given limit and window
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	return &RateLimiter{
-		requests: make(map[string][]time.Time),
-		limit:    limit,
-		window:   window,
+		requests:   make(map[string][]time.Time),
+		limit:      limit,
+		window:     window,
+		sweepEvery: 1024,
 	}
 }
 
@@ -180,28 +138,44 @@ func (rl *RateLimiter) Allow(ip string) bool {
 		return false
 	}
 
+	if len(recent) == 0 {
+		// avoid leaving empty entries around forever
+		delete(rl.requests, ip)
+	}
 	recent = append(recent, now)
 	rl.requests[ip] = recent
+
+	// Periodically evict IPs whose last request aged out of the window so the
+	// map does not grow without bound for one-off clients.
+	rl.calls++
+	if rl.calls >= rl.sweepEvery {
+		rl.calls = 0
+		for ip, times := range rl.requests {
+			if len(times) == 0 || times[len(times)-1].Before(cutoff) {
+				delete(rl.requests, ip)
+			}
+		}
+	}
 	return true
 }
 
-// RateLimitMiddleware wraps an HTTP handler with rate limiting
-func RateLimitMiddleware(next http.Handler, limiter *RateLimiter) http.Handler {
+// RateLimitMiddleware wraps an HTTP handler with rate limiting. Forwarded
+// headers are only honored when the direct peer is in trustedProxies, so a
+// direct client cannot bypass the limiter by spoofing X-Forwarded-For.
+func RateLimitMiddleware(next http.Handler, limiter *RateLimiter, trustedProxies []*net.IPNet) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ip = r.RemoteAddr
+		if isPublicPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
 		}
+
+		ip := getClientIP(r, trustedProxies)
 
 		if !limiter.Allow(ip) {
 			rateLimitHits.Inc()
-			w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", limiter.limit))
-			w.Header().Set("X-RateLimit-Window", fmt.Sprintf("%v", limiter.window))
-			w.WriteHeader(http.StatusTooManyRequests)
-			_ = json.NewEncoder(w).Encode(APIResultType{
-				Code:    3000,
-				Message: "Rate limit exceeded. Please try again later.",
-			})
+			w.Header().Set("X-RateLimit-Limit", strconv.Itoa(limiter.limit))
+			w.Header().Set("X-RateLimit-Window", strconv.Itoa(int(limiter.window.Seconds())))
+			ErrorResponse(w, ErrRateLimited, "")
 			return
 		}
 
@@ -262,8 +236,11 @@ type BuildInfo struct {
 	Date      string `json:"build_date"`
 }
 
+// buildVersion is set at link time via -ldflags "-X main.buildVersion=x.y.z".
+var buildVersion = "dev"
+
 var buildInfo = BuildInfo{
-	Version:   "dev",
+	Version:   buildVersion,
 	GoVersion: runtime.Version(),
 	Commit:    "unknown",
 	Date:      "unknown",
@@ -327,28 +304,84 @@ func notFound(w http.ResponseWriter, r *http.Request) {
 	APIResult(w, 2000, "Unknown command")
 }
 
-// circuitBreaker is the global circuit breaker instance for DNS lookups
-var circuitBreaker *CircuitBreaker
+// Server bundles the runtime dependencies used by the HTTP handlers. It is
+// constructed once from a snapshot of the global configuration; handlers use
+// the snapshot instead of reading package-level state on the request path.
+type Server struct {
+	cfg            GlobalConf
+	jm             *JobManager
+	cb             *CircuitBreaker
+	trustedProxies []*net.IPNet
+	engine         *lookupEngine
+}
+
+// newServerFromGC snapshots the global configuration (under GCMu) and builds
+// a Server with all per-server dependencies from it.
+func newServerFromGC() *Server {
+	GCMu.RLock()
+	cfg := GC
+	GCMu.RUnlock()
+
+	var cb *CircuitBreaker
+	if cfg.CircuitBreakerEnabled {
+		cb = NewCircuitBreaker(cfg.CircuitBreakerFailures, time.Duration(cfg.CircuitBreakerTimeout)*time.Second)
+		log.Infof("Circuit breaker enabled: threshold=%d, timeout=%ds", cfg.CircuitBreakerFailures, cfg.CircuitBreakerTimeout)
+	}
+
+	InitCache(cfg.CacheEnabled, cfg.CacheMaxSize, time.Duration(cfg.CacheTTL)*time.Second)
+	if cfg.CacheEnabled {
+		GetCache().SetStaleTTL(time.Duration(cfg.CacheStaleTTL) * time.Second)
+	}
+
+	s := &Server{
+		cfg:            cfg,
+		cb:             cb,
+		trustedProxies: parseTrustedProxies(cfg.TrustedProxies),
+	}
+
+	// Resolver setup happens outside the config lock — it may do network I/O
+	// (local-address probing) and can legitimately abort startup on error.
+	rc, err := buildResolverConfig(&s.cfg, AC.Config_file)
+	if err != nil {
+		log.Fatalf("invalid resolver configuration: %v", err)
+	}
+	modules := initLookupModules(&s.cfg, rc)
+	if len(modules) == 0 {
+		log.Fatal("no lookup modules available")
+	}
+	s.engine = &lookupEngine{cfg: &s.cfg, rc: rc, modules: modules}
+
+	s.jm = NewJobManager(10, &s.cfg, cb, s.engine)
+	return s
+}
+
+// recordOutcome records a lookup success/failure when the breaker is enabled.
+// Safe on a nil receiver (feature disabled).
+func (cb *CircuitBreaker) recordOutcome(success bool) {
+	if success {
+		cb.RecordSuccess()
+	} else {
+		cb.RecordFailure()
+	}
+}
 
 // runModule is the main handler function for the API server. It handles both form encoded
 // and JSON encoded requests. It extracts the lookup type from the URL or the request
 // body, and then runs the lookup using the zdns library.
 // It also integrates with the DNS cache for improved performance.
-func runModule(w http.ResponseWriter, r *http.Request) {
+func (s *Server) runModule(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	requestID := w.Header().Get(RequestIDHeader)
 
 	var dr DNSRequests
-	var gc zdns.GlobalConf
-	if err := copier.Copy(&gc, &GC); err != nil {
-		ErrorResponse(w, ErrCopyConfig, err.Error())
-		return
-	}
 
 	// Determine module and collect queries
 	var queries []string
 	var module string
+	if val, ok := vars["lookup"]; ok {
+		module = val
+	}
 
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil {
@@ -357,7 +390,12 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 	if contentType == "application/json" {
 		reqBody, err := io.ReadAll(r.Body)
 		if err != nil {
-			ErrorResponse(w, ErrReadRequest, err.Error())
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				ErrorResponse(w, ErrRequestTooLarge, "")
+			} else {
+				ErrorResponse(w, ErrReadRequest, err.Error())
+			}
 			return
 		}
 
@@ -367,19 +405,9 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if dr.Module == "" {
-			dr.Module = "A"
-		}
-		module = dr.Module
-
-		if len(dr.Queries) < 1 {
-			ErrorResponse(w, ErrEmptyQueries, "")
-			return
-		}
-
-		if len(dr.Queries) > GC.MaxQueriesPerReq {
-			ErrorResponse(w, ErrTooManyQueries, fmt.Sprintf("Maximum allowed: %d", GC.MaxQueriesPerReq))
-			return
+		// A module given in the URL takes precedence over the request body
+		if module == "" {
+			module = dr.Module
 		}
 
 		// Validate domain names
@@ -392,16 +420,15 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 
 		queries = dr.Queries
 	} else {
-		if val, ok := vars["lookup"]; ok {
-			module = val
-		} else {
-			module = "A"
-		}
-
 		// Read body for plain text queries
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			ErrorResponse(w, ErrReadRequest, err.Error())
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				ErrorResponse(w, ErrRequestTooLarge, "")
+			} else {
+				ErrorResponse(w, ErrReadRequest, err.Error())
+			}
 			return
 		}
 
@@ -415,15 +442,13 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	gc.Module = strings.ToUpper(module)
-	factory := zdns.GetLookup(gc.Module)
-	if factory == nil {
-		ErrorResponse(w, ErrInvalidModule, gc.Module)
+	module, ok := s.validateLookupParams(w, module, len(queries))
+	if !ok {
 		return
 	}
 
 	// Check circuit breaker
-	if GC.CircuitBreakerEnabled && !circuitBreaker.CanExecute() {
+	if s.cfg.CircuitBreakerEnabled && !s.cb.CanExecute() {
 		ErrorResponse(w, ErrCircuitBreakerOpen, "")
 		return
 	}
@@ -431,8 +456,8 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 	// Get cache and nameserver for cache key
 	cache := GetCache()
 	nameserver := ""
-	if len(GC.NameServers) > 0 {
-		nameserver = GC.NameServers[0]
+	if len(s.cfg.NameServers) > 0 {
+		nameserver = s.cfg.NameServers[0]
 	}
 
 	// Check cache for queries and collect uncached ones
@@ -441,11 +466,11 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 
 	if cache != nil && cache.enabled {
 		for _, query := range queries {
-			if entry := cache.Get(gc.Module, query, nameserver, false); entry != nil {
+			if entry := cache.Get(module, query, nameserver, false); entry != nil {
 				collector.Add(query, entry.Result)
 				log.WithFields(log.Fields{
 					"request_id": requestID,
-					"module":     gc.Module,
+					"module":     module,
 					"domain":     query,
 				}).Debug("Cache hit")
 			} else {
@@ -467,87 +492,78 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Setup i/o for uncached queries
-	t := strings.NewReader(strings.Join(uncachedQueries, "\n"))
-	gc.InputHandler = iohandlers.NewStreamInputHandler(t)
-
-	// Use caching output handler
-	cachedHandler := NewCachedStreamOutputHandler(gc.Module, nameserver, requestID)
-	cachedHandler.collector = collector
-	gc.OutputHandler = cachedHandler
-
-	factory.SetFlags(GC.Flags)
-
-	// allow the factory to initialize itself
-	if err := factory.Initialize(&gc); err != nil {
-		if GC.CircuitBreakerEnabled {
-			circuitBreaker.RecordFailure()
-		}
-		// Try to serve stale cache entries on error
-		servedStale := false
-		if cache != nil && cache.enabled {
-			for _, query := range uncachedQueries {
-				if entry := cache.Get(gc.Module, query, nameserver, true); entry != nil {
-					_, _ = w.Write([]byte(entry.Result + "\n"))
-					servedStale = true
+	// servePartialResults writes any buffered fresh/cached results, filling the
+	// gaps with stale cache entries. Returns true if anything was written.
+	servePartialResults := func() bool {
+		served := false
+		for _, query := range queries {
+			res, ok := collector.Pop(query)
+			if !ok && cache != nil && cache.enabled {
+				if entry := cache.Get(module, query, nameserver, true); entry != nil {
+					res = entry.Result
+					ok = true
 					log.WithFields(log.Fields{
 						"request_id": requestID,
-						"module":     gc.Module,
+						"module":     module,
 						"domain":     query,
 					}).Warn("Served stale cache entry due to lookup error")
 				}
 			}
-		}
-		if !servedStale {
-			ErrorResponse(w, ErrFactoryInit, err.Error())
-		}
-		return
-	}
-
-	// run it.
-	if err := zdns.DoLookups(factory, &gc); err != nil {
-		if GC.CircuitBreakerEnabled {
-			circuitBreaker.RecordFailure()
-		}
-		// Try to serve stale cache entries on error
-		servedStale := false
-		if cache != nil && cache.enabled {
-			for _, query := range uncachedQueries {
-				if entry := cache.Get(gc.Module, query, nameserver, true); entry != nil {
-					_, err := w.Write([]byte(entry.Result + "\n"))
-					if err != nil {
-						log.WithFields(log.Fields{
-							"request_id": requestID,
-							"module":     gc.Module,
-							"domain":     query,
-						}).Error("Failed to write stale cache entry: ", err)
-					} else {
-						servedStale = true
-						log.WithFields(log.Fields{
-							"request_id": requestID,
-							"module":     gc.Module,
-							"domain":     query,
-						}).Warn("Served stale cache entry due to lookup error")
-					}
-				}
+			if !ok {
+				continue
+			}
+			if _, err := w.Write([]byte(res + "\n")); err != nil {
+				log.WithFields(log.Fields{
+					"request_id": requestID,
+					"module":     module,
+					"domain":     query,
+				}).Error("Failed to write result: ", err)
+			} else {
+				served = true
 			}
 		}
-		if !servedStale {
-			ErrorResponse(w, ErrRunLookups, err.Error())
+		if served {
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+		return served
+	}
+
+	// Consume worker output: buffer into the ordered collector, record
+	// metrics, cache definitive answers.
+	sink := &resultSink{
+		requestID:  requestID,
+		module:     module,
+		nameserver: nameserver,
+		collector:  collector,
+		start:      time.Now(),
+	}
+
+	// Run lookups in a worker pool; each worker owns a zdns.Resolver and
+	// closes it on exit (v2 resolvers carry per-lookup state and are not
+	// goroutine-safe). Request cancellation aborts in-flight queries.
+	results := make(chan string)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sink.consume(results)
+	}()
+	execErr := s.engine.executeQueries(r.Context(), module, uncachedQueries, nil, results)
+	wg.Wait()
+
+	if execErr != nil {
+		s.cb.recordOutcome(false)
+		// Try to serve buffered results or stale cache entries on error
+		if !servePartialResults() {
+			ErrorResponse(w, ErrRunLookups, execErr.Error())
 		}
 		return
 	}
 
 	// Record success for circuit breaker
-	if GC.CircuitBreakerEnabled {
-		circuitBreaker.RecordSuccess()
-	}
-
-	// allow the factory to finalize itself
-	if err := factory.Finalize(); err != nil {
-		ErrorResponse(w, ErrFactoryFinalize, err.Error())
-		return
-	}
+	s.cb.recordOutcome(true)
 
 	for _, result := range collector.Ordered(queries) {
 		_, _ = w.Write([]byte(result + "\n"))
@@ -568,47 +584,48 @@ func runModule(w http.ResponseWriter, r *http.Request) {
 // - GET /metrics: Prometheus metrics
 // - Anything else: returns a 404 JSON response
 func startServer() {
-	// Initialize circuit breaker if enabled
-	if GC.CircuitBreakerEnabled {
-		circuitBreaker = NewCircuitBreaker(GC.CircuitBreakerFailures, time.Duration(GC.CircuitBreakerTimeout)*time.Second)
-		log.Infof("Circuit breaker enabled: threshold=%d, timeout=%ds", GC.CircuitBreakerFailures, GC.CircuitBreakerTimeout)
-	}
-
-	// Initialize DNS cache
-	InitCache(GC.CacheEnabled, GC.CacheMaxSize, time.Duration(GC.CacheTTL)*time.Second)
-	if GC.CacheEnabled {
-		globalCache.staleTTL = time.Duration(GC.CacheStaleTTL) * time.Second
-	}
-
-	// Initialize job manager
-	InitJobManager(10)
+	// Snapshot the global config and build all per-server dependencies; the
+	// request path below never reads GC again.
+	s := newServerFromGC()
+	cfg := &s.cfg
 
 	// Setup routes
 	r := mux.NewRouter().StrictSlash(true)
-	r.HandleFunc("/job/{lookup}", runModule).Methods("POST")
-	r.HandleFunc("/job", runModule).Methods("POST")
+	r.HandleFunc("/job/{lookup}", s.runModule).Methods("POST")
+	r.HandleFunc("/job", s.runModule).Methods("POST")
 
 	// Async job routes
-	r.HandleFunc("/jobs", createJobRequest).Methods("POST")
-	r.HandleFunc("/jobs", listJobsRequest).Methods("GET")
-	r.HandleFunc("/jobs/{job_id}", getJobRequest).Methods("GET")
-	r.HandleFunc("/jobs/{job_id}/results", getJobResultsRequest).Methods("GET")
-	r.HandleFunc("/jobs/{job_id}", cancelJobRequest).Methods("DELETE")
+	r.HandleFunc("/jobs", s.createJobRequest).Methods("POST")
+	r.HandleFunc("/jobs", s.listJobsRequest).Methods("GET")
+	r.HandleFunc("/jobs/{job_id}", s.getJobRequest).Methods("GET")
+	r.HandleFunc("/jobs/{job_id}/results", s.getJobResultsRequest).Methods("GET")
+	r.HandleFunc("/jobs/{job_id}", s.cancelJobRequest).Methods("DELETE")
 
 	r.HandleFunc("/ping", pingRequest)
 	r.HandleFunc("/health", healthRequest)
 	r.HandleFunc("/ready", readyRequest)
-	r.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		MetricsHandler().ServeHTTP(w, r)
-	})
+	metricsHandler := MetricsHandler()
+	r.Handle("/metrics", metricsHandler)
 	r.NotFoundHandler = http.HandlerFunc(notFound)
 
+	// Metrics must run inside the router (via r.Use) so mux.CurrentRoute is
+	// populated and the path label uses the route template. As an outer
+	// middleware every request would be labeled "unmatched".
+	r.Use(mux.MiddlewareFunc(MetricsMiddleware))
+
 	// Setup pprof routes on a separate port if enabled
-	if GC.EnablePprof {
+	if cfg.EnablePprof {
+		pprofAddr := net.JoinHostPort(cfg.ApiIP, strconv.Itoa(cfg.PprofPort))
+		pprofSrv := &http.Server{
+			Addr:              pprofAddr,
+			Handler:           http.DefaultServeMux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+		}
 		go func() {
-			pprofAddr := net.JoinHostPort(GC.ApiIP, fmt.Sprintf("%d", GC.PprofPort))
 			log.Info("Starting pprof server on ", pprofAddr)
-			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+			if err := pprofSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Error("pprof server error: ", err)
 			}
 		}()
@@ -618,35 +635,34 @@ func startServer() {
 	var middlewares []Middleware
 
 	// CORS first (outermost)
-	corsConfig := CORSConfigFromFlags(GC.CORSOrigins, GC.CORSMethods, GC.CORSHeaders)
+	corsConfig := CORSConfigFromFlags(cfg.CORSOrigins, cfg.CORSMethods, cfg.CORSHeaders)
 	middlewares = append(middlewares, func(next http.Handler) http.Handler {
-		return CORSMiddleware(next, corsConfig)
+		return CORSMiddleware(next, corsConfig, cfg.Verbosity >= 5)
 	})
 
-	// Metrics
-	middlewares = append(middlewares, MetricsMiddleware)
-
 	// Logging
-	middlewares = append(middlewares, LoggingMiddleware)
+	middlewares = append(middlewares, func(next http.Handler) http.Handler {
+		return LoggingMiddleware(next, s.trustedProxies)
+	})
 
 	// Authentication
 	middlewares = append(middlewares, func(next http.Handler) http.Handler {
-		return AuthMiddleware(next, GC.APIKey)
+		return AuthMiddleware(next, cfg.APIKey, s.trustedProxies)
 	})
 
 	// Rate limiting
-	if GC.RateLimitEnabled {
-		limiter := NewRateLimiter(GC.RateLimitRequests, time.Duration(GC.RateLimitWindow)*time.Second)
+	if cfg.RateLimitEnabled {
+		limiter := NewRateLimiter(cfg.RateLimitRequests, time.Duration(cfg.RateLimitWindow)*time.Second)
 		middlewares = append(middlewares, func(next http.Handler) http.Handler {
-			return RateLimitMiddleware(next, limiter)
+			return RateLimitMiddleware(next, limiter, s.trustedProxies)
 		})
-		log.Infof("Rate limiting enabled: %d requests per %d seconds per IP", GC.RateLimitRequests, GC.RateLimitWindow)
+		log.Infof("Rate limiting enabled: %d requests per %d seconds per IP", cfg.RateLimitRequests, cfg.RateLimitWindow)
 	}
 
 	// Body size limit
-	if GC.MaxRequestBodySize > 0 {
+	if cfg.MaxRequestBodySize > 0 {
 		middlewares = append(middlewares, func(next http.Handler) http.Handler {
-			return LimitBodySize(next, GC.MaxRequestBodySize)
+			return LimitBodySize(next, cfg.MaxRequestBodySize)
 		})
 	}
 
@@ -656,19 +672,22 @@ func startServer() {
 	// Apply middleware chain
 	handler := ChainMiddleware(r, middlewares...)
 
-	addr := net.JoinHostPort(GC.ApiIP, fmt.Sprintf("%d", GC.ApiPort))
+	addr := net.JoinHostPort(cfg.ApiIP, strconv.Itoa(cfg.ApiPort))
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      handler,
-		ReadTimeout:  time.Duration(GC.RequestTimeout) * time.Second,
-		WriteTimeout: time.Duration(GC.RequestTimeout) * time.Second,
+		ReadTimeout:  time.Duration(cfg.RequestTimeout) * time.Second,
+		WriteTimeout: time.Duration(cfg.RequestTimeout) * time.Second,
 	}
 
 	// Start server with or without TLS
+	tlsEnabled := cfg.TLSEnabled
+	tlsCertFile := cfg.TLSCertFile
+	tlsKeyFile := cfg.TLSKeyFile
 	go func() {
-		if GC.TLSEnabled {
+		if tlsEnabled {
 			log.Info("Starting HTTPS Server on ", addr)
-			if err := srv.ListenAndServeTLS(GC.TLSCertFile, GC.TLSKeyFile); err != nil && err != http.ErrServerClosed {
+			if err := srv.ListenAndServeTLS(tlsCertFile, tlsKeyFile); err != nil && err != http.ErrServerClosed {
 				log.Fatal("Server listen error: ", err)
 			}
 		} else {
@@ -686,10 +705,15 @@ func startServer() {
 
 	log.Info("Shutting down server...")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
+		cancel()
 		log.Fatal("Server forced to shutdown: ", err)
 	}
+	cancel()
+
+	// Stop job workers: cancels pending/running job contexts so in-flight
+	// lookups abort instead of running to completion during shutdown.
+	s.jm.Stop()
 	log.Info("Server exited")
 }

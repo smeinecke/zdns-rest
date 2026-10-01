@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"regexp"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -14,22 +15,58 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"github.com/zmap/dns"
-	_ "github.com/zmap/zdns/pkg/alookup"
-	_ "github.com/zmap/zdns/pkg/axfr"
-	_ "github.com/zmap/zdns/pkg/bindversion"
-	_ "github.com/zmap/zdns/pkg/dmarc"
-	_ "github.com/zmap/zdns/pkg/mxlookup"
-	_ "github.com/zmap/zdns/pkg/nslookup"
-	_ "github.com/zmap/zdns/pkg/spf"
-	"github.com/zmap/zdns/pkg/zdns"
+	_ "github.com/zmap/zdns/v2/src/modules/alookup"
+	_ "github.com/zmap/zdns/v2/src/modules/axfr"
+	_ "github.com/zmap/zdns/v2/src/modules/bindversion"
+	_ "github.com/zmap/zdns/v2/src/modules/dmarc"
+	_ "github.com/zmap/zdns/v2/src/modules/mxlookup"
+	_ "github.com/zmap/zdns/v2/src/modules/nslookup"
+	_ "github.com/zmap/zdns/v2/src/modules/spf"
+	"github.com/zmap/zdns/v2/src/zdns"
 )
 
+// GlobalConf holds the server configuration. It used to embed
+// zdns.GlobalConf (v1); after the v2 migration the zdns-facing fields are
+// declared here directly and translated into a zdns.ResolverConfig by
+// buildResolverConfig.
 type GlobalConf struct {
-	zdns.GlobalConf
-
-	Flags   *pflag.FlagSet
 	ApiPort int
 	ApiIP   string
+
+	// Lookup behavior (previously zdns.GlobalConf fields)
+	Threads              int
+	GoMaxProcs           int
+	NamePrefix           string
+	NameOverride         string
+	IterativeResolution  bool
+	LookupAllNameServers bool
+	LogFilePath          string
+	ResultVerbosity      string
+	IncludeInOutput      string
+	Verbosity            int
+	Retries              int
+	MaxDepth             int
+	CacheSize            int
+	TCPOnly              bool
+	UDPOnly              bool
+	RecycleSockets       bool
+	Timeout              time.Duration
+	IterationTimeout     time.Duration
+	NetworkTimeout       time.Duration
+	TimeFormat           string
+	Class                uint16
+	NameServers          []string
+	NameServersSpecified bool
+	LocalAddrs           []net.IP
+	LocalAddrSpecified   bool
+	OutputGroups         []string
+	OutputFormat         string // "v1" flat envelope or "v2" upstream-style envelope
+
+	// Module flags (previously passed through factory.SetFlags)
+	IPv4Lookup    bool
+	IPv6Lookup    bool
+	BlacklistFile string
+	MXCacheSize   int // deprecated: no v2 equivalent, accepted for config compat
 
 	// Rate limiting and validation
 	RateLimitEnabled   bool
@@ -39,11 +76,12 @@ type GlobalConf struct {
 	MaxRequestBodySize int64 // bytes
 
 	// Security
-	TLSEnabled  bool
-	TLSCertFile string
-	TLSKeyFile  string
-	TLSAutoHTTP bool
-	APIKey      string
+	TLSEnabled     bool
+	TLSCertFile    string
+	TLSKeyFile     string
+	TLSAutoHTTP    bool
+	APIKey         string
+	TrustedProxies string // comma-separated CIDRs whose X-Forwarded-For headers are trusted
 
 	// CORS
 	CORSOrigins string
@@ -72,6 +110,7 @@ type ArgumentsConf struct {
 	Config_file      string
 	Timeout          int
 	IterationTimeout int
+	NetworkTimeout   int
 	Class_string     string
 	NanoSeconds      bool
 }
@@ -80,31 +119,37 @@ var cfgFile string
 var GC GlobalConf
 var AC ArgumentsConf
 
-var rePort *regexp.Regexp
-var reV6 *regexp.Regexp
+// GCMu guards access to the global configuration GC. prepareConfig takes the
+// write lock; request handlers take the read lock so GC is never read while
+// it is being reconfigured.
+var GCMu sync.RWMutex
 
 const EnvPrefix = "ZDNS"
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "server",
-	Short: "High-speed, low-drag DNS lookups",
+	Use:     "server",
+	Short:   "High-speed, low-drag DNS lookups",
+	Version: buildVersion,
 	Long: `ZDNS is a library and CLI tool for making very fast DNS requests. It's built upon
 https://github.com/zmap/dns (and in turn https://github.com/miekg/dns) for constructing
 and parsing raw DNS packets.
 
 ZDNS also includes its own recursive resolution and a cache to further optimize performance.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		GC.Flags = cmd.Flags()
 		prepareConfig()
 		startServer()
 	},
 }
 
 func prepareConfig() {
+	GCMu.Lock()
+	defer GCMu.Unlock()
+
 	if GC.LogFilePath != "" {
-		f, err := os.OpenFile(GC.LogFilePath, os.O_WRONLY|os.O_CREATE, 0666)
+		f, err := os.OpenFile(GC.LogFilePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
 		if err != nil {
+			//nolint:gocritic // exits the process; deferred GCMu.Unlock is moot
 			log.Fatalf("Unable to open log file (%s): %s", GC.LogFilePath, err.Error())
 		}
 		log.SetOutput(f)
@@ -127,8 +172,21 @@ func prepareConfig() {
 	}
 
 	// complete post facto global initialization based on command line arguments
-	GC.Timeout = time.Duration(time.Second * time.Duration(AC.Timeout))
-	GC.IterationTimeout = time.Duration(time.Second * time.Duration(AC.IterationTimeout))
+	GC.Timeout = time.Second * time.Duration(AC.Timeout)
+	GC.IterationTimeout = time.Second * time.Duration(AC.IterationTimeout)
+	GC.NetworkTimeout = time.Second * time.Duration(AC.NetworkTimeout)
+
+	if GC.OutputFormat == "" {
+		GC.OutputFormat = "v2"
+	}
+	switch GC.OutputFormat {
+	case "v1", "v2":
+	default:
+		log.Fatal("Invalid argument for --output-format. Must be 'v1' or 'v2'.")
+	}
+	if GC.MXCacheSize != 1000 {
+		log.Warn("--mx-cache-size has no equivalent in zdns v2 and is ignored")
+	}
 
 	// class initialization
 	switch strings.ToUpper(AC.Class_string) {
@@ -154,14 +212,25 @@ func prepareConfig() {
 		}
 	}
 
+	// prepareConfig may run more than once in-process; reset before appends
+	// so repeated calls don't accumulate duplicate nameservers.
+	GC.NameServers = nil
+	GC.NameServersSpecified = false
+
 	if AC.Servers_string == "" {
 		// if we're doing recursive resolution, figure out default OS name servers
-		// otherwise, use the set of 13 root name servers
+		// otherwise, use the set of root name servers
 		if GC.IterativeResolution {
-			GC.NameServers = zdns.RootServers[:]
+			for _, ns := range zdns.RootServersV4 {
+				GC.NameServers = append(GC.NameServers, ns.String())
+			}
+			for _, ns := range zdns.RootServersV6 {
+				GC.NameServers = append(GC.NameServers, ns.String())
+			}
 		} else {
-			ns, err := zdns.GetDNSServers(AC.Config_file)
-			if err != nil {
+			v4ns, v6ns, err := zdns.GetDNSServers(AC.Config_file)
+			ns := slices.Concat(v4ns, v6ns)
+			if err != nil || len(ns) == 0 {
 				ns = GetDefaultResolvers()
 				log.Warn("Unable to parse resolvers file. Using ZDNS defaults: ", strings.Join(ns, ", "))
 			}
@@ -170,9 +239,6 @@ func prepareConfig() {
 		GC.NameServersSpecified = false
 		log.Info("No name servers specified. will use: ", strings.Join(GC.NameServers, ", "))
 	} else {
-		if GC.NameServerMode {
-			log.Fatal("name servers cannot be specified on command line in --name-server-mode")
-		}
 		var ns []string
 		if (AC.Servers_string)[0] == '@' {
 			filepath := (AC.Servers_string)[1:]
@@ -193,6 +259,11 @@ func prepareConfig() {
 		GC.NameServers = ns
 		GC.NameServersSpecified = true
 	}
+
+	// prepareConfig may run more than once in-process; reset before appends
+	// so repeated calls don't accumulate duplicate addresses.
+	GC.LocalAddrs = nil
+	GC.LocalAddrSpecified = false
 
 	if AC.Localaddr_string != "" {
 		for _, la := range strings.Split(AC.Localaddr_string, ",") {
@@ -228,22 +299,17 @@ func prepareConfig() {
 			log.Info("using local interface: ", AC.Localif_string)
 		}
 	}
-	if !GC.LocalAddrSpecified {
-		// Find local address for use in unbound UDP sockets
-		conn, err := net.Dial("udp", "8.8.8.8:53")
-		if err != nil {
-			log.Fatal("Unable to find default IP address: ", err)
-		}
-		GC.LocalAddrs = append(GC.LocalAddrs, conn.LocalAddr().(*net.UDPAddr).IP)
-		_ = conn.Close()
-	}
+	// No auto-detected local address: with LocalAddrs empty, zdns v2 selects
+	// the correct source address per nameserver at resolver init, which
+	// handles loopback stub resolvers (e.g. 127.0.0.53) that a single
+	// WAN-facing probe address could not reach.
 	if AC.NanoSeconds {
 		GC.TimeFormat = time.RFC3339Nano
 	} else {
 		GC.TimeFormat = time.RFC3339
 	}
 	if GC.GoMaxProcs < 0 {
-		log.Fatal("Invalid argument for --go-processes. Must be >1.")
+		log.Fatal("Invalid argument for --go-processes. Must be >= 0.")
 	}
 	if GC.GoMaxProcs != 0 {
 		runtime.GOMAXPROCS(GC.GoMaxProcs)
@@ -251,28 +317,18 @@ func prepareConfig() {
 	if GC.UDPOnly && GC.TCPOnly {
 		log.Fatal("TCP Only and UDP Only are conflicting")
 	}
-	if GC.NameServerMode && GC.AlexaFormat {
-		log.Fatal("Alexa mode is incompatible with name server mode")
-	}
-	if GC.NameServerMode && GC.MetadataFormat {
-		log.Fatal("Metadata mode is incompatible with name server mode")
-	}
-	if GC.NameServerMode && GC.NameOverride == "" && GC.Module != "BINDVERSION" {
-		log.Fatal("Static Name must be defined with --override-name in --name-server-mode unless DNS module does not expect names (e.g., BINDVERSION).")
+	if GC.TLSAutoHTTP {
+		log.Warn("--tls-auto-http is not implemented; no HTTP->HTTPS redirect listener will be started")
 	}
 	// Output Groups are defined by a base + any additional fields that the user wants
-	groups := strings.Split(GC.IncludeInOutput, ",")
+	groups := splitAndTrim(GC.IncludeInOutput, ",")
 	if GC.ResultVerbosity != "short" && GC.ResultVerbosity != "normal" && GC.ResultVerbosity != "long" && GC.ResultVerbosity != "trace" {
 		log.Fatal("Invalid result verbosity. Options: short, normal, long, trace")
 	}
 
-	// set defaults
-	GC.InputFilePath = "-"
-	GC.OutputFilePath = "-"
-	GC.AlexaFormat = false
-
-	GC.OutputGroups = append(GC.OutputGroups, GC.ResultVerbosity)
-	GC.OutputGroups = append(GC.OutputGroups, groups...)
+	// Reset rather than append — prepareConfig may run more than once
+	// in-process (tests, reconfiguration) and must be idempotent.
+	GC.OutputGroups = append([]string{GC.ResultVerbosity}, groups...)
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -286,8 +342,6 @@ func main() {
 // init sets up the default logging format and sets up the viper configuration reader.
 // It also sets up the root command and its flags.
 func init() {
-	rePort = regexp.MustCompile(`:\d+$`)       // string ends with potential port number
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`) // string starts like valid IPv6 address
 	log.SetFormatter(&log.TextFormatter{})
 
 	cobra.OnInitialize(initConfig)
@@ -304,10 +358,8 @@ func init() {
 	rootCmd.PersistentFlags().IntVar(&GC.GoMaxProcs, "go-processes", 0, "number of OS processes (GOMAXPROCS)")
 	rootCmd.PersistentFlags().StringVar(&GC.NamePrefix, "prefix", "", "name to be prepended to what's passed in (e.g., www.)")
 	rootCmd.PersistentFlags().StringVar(&GC.NameOverride, "override-name", "", "name overrides all passed in names")
-	rootCmd.PersistentFlags().BoolVar(&GC.MetadataFormat, "metadata-passthrough", false, "if input records have the form 'name,METADATA', METADATA will be propagated to the output")
 	rootCmd.PersistentFlags().BoolVar(&GC.IterativeResolution, "iterative", false, "Perform own iteration instead of relying on recursive resolver")
 	rootCmd.PersistentFlags().BoolVar(&GC.LookupAllNameServers, "all-nameservers", false, "Perform the lookup via all the nameservers for the domain.")
-	rootCmd.PersistentFlags().StringVar(&GC.MetadataFilePath, "metadata-file", "", "where should JSON metadata be saved")
 	rootCmd.PersistentFlags().StringVar(&GC.LogFilePath, "log-file", "", "where should JSON logs be saved")
 
 	rootCmd.PersistentFlags().StringVar(&GC.ResultVerbosity, "result-verbosity", "normal", "Sets verbosity of each output record. Options: short, normal, long, trace")
@@ -331,6 +383,9 @@ func init() {
 
 	// API Key authentication
 	rootCmd.PersistentFlags().StringVar(&GC.APIKey, "api-key", "", "API key for authentication (empty=disabled)")
+
+	// Proxy trust
+	rootCmd.PersistentFlags().StringVar(&GC.TrustedProxies, "trusted-proxies", "", "comma-separated IPs/CIDRs allowed to set X-Forwarded-For/X-Real-IP (empty=trust direct peer only)")
 
 	// CORS flags
 	rootCmd.PersistentFlags().StringVar(&GC.CORSOrigins, "cors-origins", "", "allowed CORS origins (comma-separated, empty=CORS disabled)")
@@ -362,7 +417,6 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&GC.TCPOnly, "tcp-only", false, "Only perform lookups over TCP")
 	rootCmd.PersistentFlags().BoolVar(&GC.UDPOnly, "udp-only", false, "Only perform lookups over UDP")
 	rootCmd.PersistentFlags().BoolVar(&GC.RecycleSockets, "recycle-sockets", true, "Create long-lived unbound UDP socket for each thread at launch and reuse for all (UDP) queries")
-	rootCmd.PersistentFlags().BoolVar(&GC.NameServerMode, "name-server-mode", false, "Treats input as nameservers to query with a static query rather than queries to send to a static name server")
 
 	rootCmd.PersistentFlags().StringVar(&AC.Servers_string, "name-servers", "", "List of DNS servers to use. Can be passed as comma-delimited string or via @/path/to/file. If no port is specified, defaults to 53.")
 	rootCmd.PersistentFlags().StringVar(&AC.Localaddr_string, "local-addr", "", "comma-delimited list of local addresses to use")
@@ -373,10 +427,12 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&AC.Class_string, "class", "INET", "DNS class to query. Options: INET, CSNET, CHAOS, HESIOD, NONE, ANY. Default: INET.")
 	rootCmd.PersistentFlags().BoolVar(&AC.NanoSeconds, "nanoseconds", false, "Use nanosecond resolution timestamps")
 
-	rootCmd.PersistentFlags().Bool("ipv4-lookup", false, "Perform an IPv4 Lookup in modules")
-	rootCmd.PersistentFlags().Bool("ipv6-lookup", false, "Perform an IPv6 Lookup in modules")
-	rootCmd.PersistentFlags().String("blacklist-file", "", "blacklist file for servers to exclude from lookups")
-	rootCmd.PersistentFlags().Int("mx-cache-size", 1000, "number of records to store in MX -> A/AAAA cache")
+	rootCmd.PersistentFlags().BoolVar(&GC.IPv4Lookup, "ipv4-lookup", false, "Perform an IPv4 Lookup in modules")
+	rootCmd.PersistentFlags().BoolVar(&GC.IPv6Lookup, "ipv6-lookup", false, "Perform an IPv6 Lookup in modules")
+	rootCmd.PersistentFlags().StringVar(&GC.BlacklistFile, "blacklist-file", "", "blacklist file for servers to exclude from lookups (AXFR module)")
+	rootCmd.PersistentFlags().IntVar(&GC.MXCacheSize, "mx-cache-size", 1000, "deprecated: no effect with zdns v2")
+	rootCmd.PersistentFlags().StringVar(&GC.OutputFormat, "output-format", "v2", "result envelope format: 'v2' (upstream zdns v2, default) or 'v1' (legacy flat)")
+	rootCmd.PersistentFlags().IntVar(&AC.NetworkTimeout, "network-timeout", 2, "timeout for round trip network operations, in seconds")
 }
 
 // Reference: https://github.com/carolynvs/stingoftheviper/blob/main/main.go
@@ -385,16 +441,25 @@ func init() {
 func BindFlags(cmd *cobra.Command, v *viper.Viper, envPrefix string) {
 	cmd.Flags().VisitAll(func(f *pflag.Flag) {
 		// Environment variables can't have dashes in them, so bind them to their equivalent
-		// keys with underscores, e.g. --alexa to ZDNS_ALEXA
-		if strings.Contains(f.Name, "-") {
-			envVarSuffix := strings.ToUpper(strings.ReplaceAll(f.Name, "-", "_"))
-			_ = v.BindEnv(f.Name, fmt.Sprintf("%s_%s", envPrefix, envVarSuffix))
-		}
+		// keys with underscores, e.g. --alexa to ZDNS_ALEXA. Apply to every flag —
+		// single-word flags (--threads -> ZDNS_THREADS) need binding too.
+		envVarSuffix := strings.ToUpper(strings.ReplaceAll(f.Name, "-", "_"))
+		_ = v.BindEnv(f.Name, fmt.Sprintf("%s_%s", envPrefix, envVarSuffix))
 
 		// Apply the viper config value to the flag when the flag is not set and viper has a value
 		if !f.Changed && v.IsSet(f.Name) {
-			val := v.Get(f.Name)
-			_ = cmd.Flags().Set(f.Name, fmt.Sprintf("%v", val))
+			switch val := v.Get(f.Name).(type) {
+			case []interface{}:
+				// YAML lists (e.g. name-servers: [8.8.8.8, 1.1.1.1]) must be
+				// joined — fmt "%v" would produce "[8.8.8.8 1.1.1.1]".
+				strs := make([]string, len(val))
+				for i, e := range val {
+					strs[i] = fmt.Sprintf("%v", e)
+				}
+				_ = cmd.Flags().Set(f.Name, strings.Join(strs, ","))
+			default:
+				_ = cmd.Flags().Set(f.Name, fmt.Sprintf("%v", val))
+			}
 		}
 	})
 }
@@ -461,11 +526,15 @@ func initConfig() {
 		if isKeyValueFormat {
 			if err := loadKeyValueConfig(configFile); err == nil {
 				fmt.Fprintln(os.Stderr, "Using config file:", configFile)
+			} else {
+				log.Warnf("Unable to load config file %s: %s", configFile, err)
 			}
 		} else {
 			viper.SetConfigFile(configFile)
 			if err := viper.ReadInConfig(); err == nil {
 				fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+			} else {
+				log.Warnf("Unable to load config file %s: %s", configFile, err)
 			}
 		}
 	} else {
@@ -487,13 +556,18 @@ func GetDefaultResolvers() []string {
 // AddDefaultPortToDNSServerName adds a default port of 53 to the given DNS server name.
 // If the DNS server name is an IPv6 address, it will be enclosed in square brackets.
 func AddDefaultPortToDNSServerName(s string) string {
-	// If the given string is an IPv6 address without brackets, enclose it in square brackets first
-	if reV6.MatchString(s) && !strings.HasPrefix(s, "[") {
-		s = "[" + s + "]"
+	if _, port, err := net.SplitHostPort(s); err == nil {
+		if port != "" {
+			return s // already includes a port (host:port or [v6]:port)
+		}
+		// "host:" or "[v6]:" with an empty port: strip the separator
+		return strings.TrimSuffix(s, ":") + ":53"
 	}
-	// If the given string does not end with a port number, add 53
-	if !rePort.MatchString(s) {
-		return s + ":53"
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		return s + ":53" // bracketed IPv6 literal without port
 	}
-	return s
+	if ip := net.ParseIP(s); ip != nil && strings.Contains(s, ":") {
+		return "[" + s + "]:53" // bare IPv6 literal without port
+	}
+	return s + ":53"
 }

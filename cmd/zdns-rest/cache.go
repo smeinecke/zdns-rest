@@ -4,7 +4,6 @@ import (
 	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"sync"
 	"time"
 
@@ -69,6 +68,22 @@ func (e *CacheEntry) IsStale(staleTTL time.Duration) bool {
 	}
 	staleDeadline := e.ExpiresAt.Add(staleTTL)
 	return time.Now().After(e.ExpiresAt) && time.Now().Before(staleDeadline)
+}
+
+// cacheableStatuses are the zdns result statuses representing definitive
+// answers. Transient outcomes (TIMEOUT, SERVFAIL, ERROR, ...) must not be
+// cached, otherwise a temporary resolver failure gets replayed for the TTL.
+var cacheableStatuses = map[string]bool{
+	"NOERROR":   true,
+	"NXDOMAIN":  true,
+	"NODATA":    true,
+	"NORECORD":  true,
+	"NO_ANSWER": true,
+}
+
+// isCacheableStatus reports whether a zdns result status is safe to cache.
+func isCacheableStatus(status string) bool {
+	return cacheableStatuses[status]
 }
 
 // DNSCache is an in-memory cache for DNS lookup results
@@ -189,39 +204,6 @@ func (c *DNSCache) Set(module, query, nameserver, result string) {
 	cacheSize.Set(float64(len(c.entries)))
 }
 
-// Delete removes an entry from the cache
-func (c *DNSCache) Delete(module, query, nameserver string) {
-	if c == nil || !c.enabled {
-		return
-	}
-
-	key := generateCacheKey(module, query, nameserver)
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if _, exists := c.entries[key]; exists {
-		delete(c.entries, key)
-		c.removeFromLRU(key)
-		cacheSize.Set(float64(len(c.entries)))
-	}
-}
-
-// Clear removes all entries from the cache
-func (c *DNSCache) Clear() {
-	if c == nil || !c.enabled {
-		return
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.entries = make(map[string]*CacheEntry)
-	c.lruList = list.New()
-	c.lruIndex = make(map[string]*list.Element)
-	cacheSize.Set(0)
-}
-
 // Size returns the current number of entries in the cache
 func (c *DNSCache) Size() int {
 	if c == nil || !c.enabled {
@@ -231,57 +213,6 @@ func (c *DNSCache) Size() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.entries)
-}
-
-// Stats returns cache statistics
-func (c *DNSCache) Stats() CacheStats {
-	if c == nil || !c.enabled {
-		return CacheStats{}
-	}
-
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	var fresh, stale, expired int
-
-	for _, entry := range c.entries {
-		if entry.IsExpired() {
-			if entry.IsStale(c.staleTTL) {
-				stale++
-			} else {
-				expired++
-			}
-		} else {
-			fresh++
-		}
-	}
-
-	return CacheStats{
-		Size:     len(c.entries),
-		Fresh:    fresh,
-		Stale:    stale,
-		Expired:  expired,
-		MaxSize:  c.maxSize,
-		TTL:      c.ttl,
-		StaleTTL: c.staleTTL,
-	}
-}
-
-// CacheStats holds cache statistics
-type CacheStats struct {
-	Size     int           `json:"size"`
-	Fresh    int           `json:"fresh"`
-	Stale    int           `json:"stale"`
-	Expired  int           `json:"expired"`
-	MaxSize  int           `json:"max_size"`
-	TTL      time.Duration `json:"ttl"`
-	StaleTTL time.Duration `json:"stale_ttl"`
-}
-
-// ToJSON returns cache stats as JSON
-func (s CacheStats) ToJSON() string {
-	data, _ := json.Marshal(s)
-	return string(data)
 }
 
 // updateLRU moves the key to the end of the LRU list (most recently used)
@@ -371,7 +302,7 @@ func (c *DNSCache) StartCleanup(interval time.Duration) chan<- struct{} {
 // Global cache instance
 var (
 	globalCache       *DNSCache
-	globalCacheMu     sync.Mutex
+	globalCacheMu     sync.RWMutex
 	globalCacheStopCh chan<- struct{}
 )
 
@@ -395,7 +326,19 @@ func InitCache(enabled bool, maxSize int, ttl time.Duration) {
 	}
 }
 
+// SetStaleTTL updates the stale TTL of the cache
+func (c *DNSCache) SetStaleTTL(d time.Duration) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.staleTTL = d
+}
+
 // GetCache returns the global cache instance
 func GetCache() *DNSCache {
+	globalCacheMu.RLock()
+	defer globalCacheMu.RUnlock()
 	return globalCache
 }

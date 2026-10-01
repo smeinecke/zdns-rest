@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -17,10 +16,11 @@ import (
 // TestHealthRequest tests the health endpoint
 func TestHealthRequest(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/health", nil)
+	r := httptest.NewRequest(http.MethodGet, "/health", nil)
 	healthRequest(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("healthRequest() status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
@@ -44,10 +44,11 @@ func TestHealthRequest(t *testing.T) {
 // TestReadyRequest tests the ready endpoint
 func TestReadyRequest(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/ready", nil)
+	r := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	readyRequest(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("readyRequest() status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
@@ -103,6 +104,7 @@ func TestErrorResponse(t *testing.T) {
 			ErrorResponse(w, tt.errCode, tt.detail)
 
 			resp := w.Result()
+			defer resp.Body.Close()
 			if resp.StatusCode != tt.wantStatus {
 				t.Errorf("ErrorResponse() status = %d, want %d", resp.StatusCode, tt.wantStatus)
 			}
@@ -145,6 +147,7 @@ func TestAPIResult(t *testing.T) {
 			APIResult(w, tt.code, tt.message)
 
 			resp := w.Result()
+			defer resp.Body.Close()
 			if resp.StatusCode != tt.wantStatus {
 				t.Errorf("APIResult() status = %d, want %d", resp.StatusCode, tt.wantStatus)
 			}
@@ -168,6 +171,7 @@ func TestPingRequest(t *testing.T) {
 	pingRequest(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("pingRequest() status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
@@ -185,6 +189,7 @@ func TestNotFound(t *testing.T) {
 	notFound(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("notFound() status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -196,80 +201,23 @@ func TestNotFound(t *testing.T) {
 	}
 }
 
-func TestStreamOutputHandler(t *testing.T) {
-	w := httptest.NewRecorder()
-	handler := NewStreamOutputHandler(w)
-
-	results := make(chan string, 3)
-	results <- `{"name":"example.com","status":"NOERROR"}`
-	results <- `{"name":"example.org","status":"NOERROR"}`
-	close(results)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	err := handler.WriteResults(results, &wg)
-	wg.Wait()
-
-	if err != nil {
-		t.Errorf("WriteResults() error = %v", err)
-	}
-
-	body := w.Body.String()
-	lines := strings.Split(strings.TrimSpace(body), "\n")
-	if len(lines) != 2 {
-		t.Errorf("WriteResults() wrote %d lines, want 2", len(lines))
-	}
-
-	for i, line := range lines {
-		if !strings.Contains(line, "NOERROR") {
-			t.Errorf("WriteResults() line %d = %q, missing expected content", i, line)
-		}
-	}
-}
-
-func TestStreamOutputHandler_EmptyChannel(t *testing.T) {
-	w := httptest.NewRecorder()
-	handler := NewStreamOutputHandler(w)
-
-	results := make(chan string)
-	close(results)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	err := handler.WriteResults(results, &wg)
-	wg.Wait()
-
-	if err != nil {
-		t.Errorf("WriteResults() error = %v", err)
-	}
-
-	if w.Body.Len() != 0 {
-		t.Errorf("WriteResults() wrote %d bytes for empty channel, want 0", w.Body.Len())
-	}
-}
-
-func TestCachedStreamOutputHandler_CachesResults(t *testing.T) {
+func TestResultSink_CachesResults(t *testing.T) {
 	InitCache(true, 100, time.Hour)
 	defer InitCache(false, 0, 0)
 
-	handler := NewCachedStreamOutputHandler("A", "8.8.8.8:53", "req-1")
-	handler.collector = NewOrderedResultCollector()
+	sink := &resultSink{
+		requestID:  "req-1",
+		module:     "A",
+		nameserver: "8.8.8.8:53",
+		collector:  NewOrderedResultCollector(),
+		start:      time.Now(),
+	}
 
 	results := make(chan string, 1)
 	results <- `{"name":"example.com","status":"NOERROR"}`
 	close(results)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	err := handler.WriteResults(results, &wg)
-	wg.Wait()
-
-	if err != nil {
-		t.Fatalf("WriteResults() error = %v", err)
-	}
+	sink.consume(results)
 
 	entry := GetCache().Get("A", "example.com", "8.8.8.8:53", false)
 	if entry == nil {
@@ -279,7 +227,7 @@ func TestCachedStreamOutputHandler_CachesResults(t *testing.T) {
 		t.Fatalf("cached result = %q", entry.Result)
 	}
 
-	ordered := handler.collector.Ordered([]string{"example.com"})
+	ordered := sink.collector.Ordered([]string{"example.com"})
 	if len(ordered) != 1 || ordered[0] != entry.Result {
 		t.Fatalf("collector output = %#v", ordered)
 	}
@@ -313,9 +261,10 @@ func TestRunModule_InvalidJSON(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/job", body)
 	r.Header.Set("Content-Type", "application/json")
 
-	runModule(w, r)
+	newTestServer().runModule(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() with invalid JSON status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -330,9 +279,10 @@ func TestRunModule_MissingQueries(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/job", body)
 	r.Header.Set("Content-Type", "application/json")
 
-	runModule(w, r)
+	newTestServer().runModule(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() with missing queries status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -347,9 +297,10 @@ func TestRunModule_JSONContentTypeWithCharset(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/job", body)
 	r.Header.Set("Content-Type", "application/json; charset=utf-8")
 
-	runModule(w, r)
+	newTestServer().runModule(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("runModule() status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -385,9 +336,10 @@ func TestDNSRequestsSerialization(t *testing.T) {
 }
 
 func TestRouter(t *testing.T) {
+	s := newTestServer()
 	r := mux.NewRouter().StrictSlash(true)
-	r.HandleFunc("/job/{lookup}", runModule).Methods("POST")
-	r.HandleFunc("/job", runModule).Methods("POST")
+	r.HandleFunc("/job/{lookup}", s.runModule).Methods("POST")
+	r.HandleFunc("/job", s.runModule).Methods("POST")
 	r.HandleFunc("/ping", pingRequest)
 	r.NotFoundHandler = http.HandlerFunc(notFound)
 
@@ -432,9 +384,10 @@ func TestRunModule_FormEncoded(t *testing.T) {
 		}
 	}()
 
-	runModule(w, r)
+	newTestServer().runModule(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	// Should get error due to invalid module or factory initialization failure
 	if resp.StatusCode == http.StatusOK {
 		t.Log("runModule with form-encoded succeeded (may be due to DNS available)")
@@ -450,9 +403,10 @@ func TestRunModule_InvalidModule(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/job", body)
 	r.Header.Set("Content-Type", "application/json")
 
-	runModule(w, r)
+	newTestServer().runModule(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() with invalid module status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -473,9 +427,10 @@ func TestRunModule_DefaultModule(t *testing.T) {
 		}
 	}()
 
-	runModule(w, r)
+	newTestServer().runModule(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	// Should use default module "A" and fail due to factory initialization
 	if resp.StatusCode == http.StatusOK {
 		t.Log("runModule with default module succeeded")
@@ -497,9 +452,10 @@ func TestRunModule_URLModule(t *testing.T) {
 		}
 	}()
 
-	runModule(w, r)
+	newTestServer().runModule(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
 		t.Log("runModule with URL module succeeded")
 	}
@@ -515,9 +471,10 @@ func TestRunModule_ReadBodyError(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/job", body)
 	r.Header.Set("Content-Type", "application/json")
 
-	runModule(w, r)
+	newTestServer().runModule(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() with read error status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -545,9 +502,10 @@ func TestRunModule_EmptyModuleDefault(t *testing.T) {
 		}
 	}()
 
-	runModule(w, r)
+	newTestServer().runModule(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	// Should use default "A" and likely fail due to factory init
 	t.Logf("Response status: %d", resp.StatusCode)
 }
@@ -637,7 +595,7 @@ func TestRateLimitMiddleware(t *testing.T) {
 
 	handler := RateLimitMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}), limiter)
+	}), limiter, nil)
 
 	// First 2 requests pass
 	for i := 0; i < 2; i++ {
@@ -701,16 +659,19 @@ func TestLimitBodySize(t *testing.T) {
 func TestRunModule_TooManyQueries(t *testing.T) {
 	GC.ApiPort = 8080
 	GC.ApiIP = "127.0.0.1"
+	oldMax := GC.MaxQueriesPerReq
 	GC.MaxQueriesPerReq = 2
+	t.Cleanup(func() { GC.MaxQueriesPerReq = oldMax })
 
 	w := httptest.NewRecorder()
 	body := bytes.NewBufferString(`{"module":"A","queries":["example.com","example.org","example.net"]}`)
 	r := httptest.NewRequest(http.MethodPost, "/job", body)
 	r.Header.Set("Content-Type", "application/json")
 
-	runModule(w, r)
+	newTestServer().runModule(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -725,10 +686,66 @@ func TestRunModule_InvalidDomain(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/job", body)
 	r.Header.Set("Content-Type", "application/json")
 
-	runModule(w, r)
+	newTestServer().runModule(w, r)
 
 	resp := w.Result()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestOrderedResultCollector_Pop(t *testing.T) {
+	collector := NewOrderedResultCollector()
+	collector.Add("example.com", "first")
+	collector.Add("example.com", "second")
+
+	if got, ok := collector.Pop("example.com"); !ok || got != "first" {
+		t.Fatalf("Pop() = %q, %v; want \"first\", true", got, ok)
+	}
+	if got, ok := collector.Pop("example.com"); !ok || got != "second" {
+		t.Fatalf("Pop() = %q, %v; want \"second\", true", got, ok)
+	}
+	if got, ok := collector.Pop("example.com"); ok {
+		t.Fatalf("Pop() on drained queue = %q, true; want false", got)
+	}
+	if _, ok := collector.Pop("unknown.example"); ok {
+		t.Fatal("Pop() on unknown query returned true")
+	}
+}
+
+func TestCircuitBreakerHelpers(t *testing.T) {
+	// nil breaker (feature disabled) must be a permissive no-op
+	var cb *CircuitBreaker
+	if !cb.CanExecute() {
+		t.Error("nil breaker CanExecute() = false, want true")
+	}
+	cb.recordOutcome(false) // must not panic on nil breaker
+	cb.recordOutcome(true)
+
+	// real breaker blocks after enough failures
+	cb = NewCircuitBreaker(1, time.Minute)
+	cb.recordOutcome(false)
+	if cb.CanExecute() {
+		t.Error("CanExecute() = true after threshold failure, want false")
+	}
+}
+
+func TestRoutePathTemplate(t *testing.T) {
+	// Request that never went through a mux router
+	r := httptest.NewRequest(http.MethodGet, "/jobs/job-1", nil)
+	if got := routePathTemplate(r); got != "unmatched" {
+		t.Errorf("routePathTemplate() = %q, want %q", got, "unmatched")
+	}
+
+	// Request matched by a mux route resolves to the path template
+	var got string
+	router := mux.NewRouter()
+	router.HandleFunc("/jobs/{job_id}", func(w http.ResponseWriter, r *http.Request) {
+		got = routePathTemplate(r)
+	})
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/jobs/job-123", nil))
+	if got != "/jobs/{job_id}" {
+		t.Errorf("routePathTemplate() = %q, want %q", got, "/jobs/{job_id}")
 	}
 }

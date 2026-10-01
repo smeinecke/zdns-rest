@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 )
 
 func TestChainMiddleware(t *testing.T) {
@@ -33,7 +32,7 @@ func TestChainMiddleware(t *testing.T) {
 	result := ChainMiddleware(handler, m1, m2)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	result.ServeHTTP(w, r)
 
 	expected := []string{"m1-before", "m2-before", "handler", "m2-after", "m1-after"}
@@ -56,45 +55,10 @@ func TestChainMiddleware_NoMiddlewares(t *testing.T) {
 	result := ChainMiddleware(handler)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	result.ServeHTTP(w, r)
 
 	if !called {
 		t.Error("handler was not called")
-	}
-}
-
-func TestTimeoutMiddleware(t *testing.T) {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(100 * time.Millisecond)
-		w.WriteHeader(http.StatusOK)
-	})
-
-	middleware := TimeoutMiddleware(10 * time.Millisecond)
-	wrapped := middleware(handler)
-
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/", nil)
-	wrapped.ServeHTTP(w, r)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
-	}
-}
-
-func TestTimeoutMiddleware_FastResponse(t *testing.T) {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	middleware := TimeoutMiddleware(5 * time.Second)
-	wrapped := middleware(handler)
-
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/", nil)
-	wrapped.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
 	}
 }

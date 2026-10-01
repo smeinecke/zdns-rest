@@ -2,6 +2,8 @@
 
 A REST API wrapper for [zmap/zdns](https://github.com/zmap/zdns), providing HTTP endpoints for high-speed DNS lookups.
 
+**New here?** See [QUICKSTART.md](QUICKSTART.md) — running, first lookups, async jobs, config. Internals are covered in [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Build
 
 ```bash
@@ -37,6 +39,9 @@ All flags can be provided via command line, environment variables, or a config f
 | `--circuit-breaker` | Enable circuit breaker | `false` |
 | `--circuit-breaker-failures` | Circuit breaker threshold | `5` |
 | `--circuit-breaker-timeout` | Circuit breaker timeout (seconds) | `60` |
+| `--output-format` | Result envelope format: `v2` (upstream zdns v2, nested per-module) or `v1` (legacy flat) | `v2` |
+| `--network-timeout` | Timeout per network round-trip (seconds) | `2` |
+| `--trusted-proxies` | IPs/CIDRs whose `X-Forwarded-For`/`X-Real-IP` are honored | (direct peer only) |
 
 Environment variables use `ZDNS_` prefix with uppercase and underscores, e.g. `ZDNS_BIND_PORT=9090`.
 
@@ -122,7 +127,17 @@ go mod tidy
 
 ### CI/CD
 
-See [CICD.md](CICD.md) for full CI/CD pipeline documentation.
+Two GitHub Actions workflows:
+
+- `.github/workflows/ci.yml` — lint (golangci-lint), `govulncheck`,
+  dependency review on PRs, tests with race detector + 70% coverage gate,
+  integration tests, cross-platform builds, Docker smoke (incl. `/ping`
+  health check)
+- `.github/workflows/release.yml` — tag-validated release: binary matrix,
+  GHCR multi-arch images, SHA256SUMS, and SLSA build-provenance attestations
+  for binaries and image digests
+
+Dependabot keeps Go modules, Actions, and Docker base images updated.
 
 ---
 

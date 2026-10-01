@@ -11,10 +11,10 @@ func TestAuthMiddleware_Disabled(t *testing.T) {
 	// Test with no API key (auth disabled)
 	handler := AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}), "")
+	}), "", nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/job", nil)
+	r := httptest.NewRequest(http.MethodGet, "/job", nil)
 	handler.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
@@ -26,10 +26,10 @@ func TestAuthMiddleware_ValidBearerToken(t *testing.T) {
 	apiKey := "secret-key"
 	handler := AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}), apiKey)
+	}), apiKey, nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/job", nil)
+	r := httptest.NewRequest(http.MethodGet, "/job", nil)
 	r.Header.Set("Authorization", "Bearer secret-key")
 	handler.ServeHTTP(w, r)
 
@@ -42,10 +42,10 @@ func TestAuthMiddleware_ValidAPIKeyHeader(t *testing.T) {
 	apiKey := "secret-key"
 	handler := AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}), apiKey)
+	}), apiKey, nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/job", nil)
+	r := httptest.NewRequest(http.MethodGet, "/job", nil)
 	r.Header.Set("X-API-Key", "secret-key")
 	handler.ServeHTTP(w, r)
 
@@ -58,10 +58,10 @@ func TestAuthMiddleware_MissingKey(t *testing.T) {
 	apiKey := "secret-key"
 	handler := AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}), apiKey)
+	}), apiKey, nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/job", nil)
+	r := httptest.NewRequest(http.MethodGet, "/job", nil)
 	handler.ServeHTTP(w, r)
 
 	if w.Code != http.StatusUnauthorized {
@@ -78,10 +78,10 @@ func TestAuthMiddleware_InvalidKey(t *testing.T) {
 	apiKey := "secret-key"
 	handler := AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}), apiKey)
+	}), apiKey, nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/job", nil)
+	r := httptest.NewRequest(http.MethodGet, "/job", nil)
 	r.Header.Set("X-API-Key", "wrong-key")
 	handler.ServeHTTP(w, r)
 
@@ -94,10 +94,10 @@ func TestAuthMiddleware_CaseInsensitiveBearer(t *testing.T) {
 	apiKey := "secret-key"
 	handler := AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}), apiKey)
+	}), apiKey, nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/job", nil)
+	r := httptest.NewRequest(http.MethodGet, "/job", nil)
 	r.Header.Set("Authorization", "bearer secret-key")
 	handler.ServeHTTP(w, r)
 

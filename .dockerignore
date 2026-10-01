@@ -1,0 +1,27 @@
+# VCS and CI
+.git/
+.github/
+.gitignore
+.pre-commit-config.yaml
+
+# Build artifacts and local binaries
+/zdns-rest
+*.exe
+*.out
+coverage.*
+
+# Docs and editor config (not needed in image)
+*.md
+.vscode/
+.openapi-generator/
+
+# Config examples and deploy assets copied selectively if needed
+config/
+systemd/
+prometheus.yml
+docker-compose.yml
+Dockerfile
+Dockerfile.release
+
+# Test only
+*_test.go

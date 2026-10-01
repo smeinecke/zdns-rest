@@ -18,7 +18,7 @@ type CORSConfig struct {
 
 // CORSMiddleware wraps an HTTP handler with CORS support
 // If CORS is not enabled, returns the handler unchanged (secure by default)
-func CORSMiddleware(next http.Handler, config CORSConfig) http.Handler {
+func CORSMiddleware(next http.Handler, config CORSConfig, debug bool) http.Handler {
 	if !config.Enabled || len(config.Origins) == 0 {
 		log.Info("CORS disabled - denying cross-origin requests")
 		return next
@@ -31,7 +31,7 @@ func CORSMiddleware(next http.Handler, config CORSConfig) http.Handler {
 		AllowedMethods:   config.Methods,
 		AllowedHeaders:   config.Headers,
 		AllowCredentials: true,
-		Debug:            GC.Verbosity >= 5,
+		Debug:            debug,
 	})
 
 	return c.Handler(next)

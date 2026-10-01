@@ -40,7 +40,9 @@ curl -H "X-API-Key: your-api-key" http://localhost:8080/job
 
 ## Rate Limiting
 
-When rate limiting is enabled (`--rate-limit`), the API tracks requests per IP address. Rate limit headers are included in responses:
+When rate limiting is enabled (`--rate-limit`), the API tracks requests per client IP address. The client IP is derived from the direct peer; `X-Forwarded-For`/`X-Real-IP` headers are only honored when the peer is listed in `--trusted-proxies` (comma-separated IPs/CIDRs, e.g. `--trusted-proxies 10.0.0.0/8,192.168.1.1`). Configure this when running behind a reverse proxy or load balancer; without it, all proxied requests share the proxy's rate-limit bucket and clients cannot spoof their rate-limit identity.
+
+Rate limit headers are included in responses:
 
 | Header | Description |
 |--------|-------------|
@@ -186,7 +188,13 @@ Run a DNS lookup job with JSON body.
 | `BINDVERSION` | BIND version query |
 | `AXFR` | Zone transfer attempt |
 
-**Response** (one JSON object per line):
+**Response** (one JSON object per line). Default `v2` format (upstream zdns v2 envelope — results nested per module, includes `duration`):
+```ndjson
+{"name":"example.com","results":{"A":{"status":"NOERROR","timestamp":"2026-01-01T00:00:00+00:00","duration":0.012,"data":{"answers":[{"answer":"93.184.216.34","class":"IN","name":"example.com","ttl":300,"type":"A"}]}}}}
+{"name":"example.org","results":{"A":{"status":"NOERROR","timestamp":"2026-01-01T00:00:00+00:00","duration":0.018,"data":{"answers":[{"answer":"93.184.216.34","class":"IN","name":"example.org","ttl":300,"type":"A"}]}}}}
+```
+
+With `--output-format=v1` (legacy flat envelope, for backward compatibility with existing consumers):
 ```ndjson
 {"data":{"answers":[{"answer":"93.184.216.34","class":"IN","name":"example.com","ttl":300,"type":"A"}]},"name":"example.com","status":"NOERROR","timestamp":"2026-01-01T00:00:00+00:00"}
 {"data":{"answers":[{"answer":"93.184.216.34","class":"IN","name":"example.org","ttl":300,"type":"A"}]},"name":"example.org","status":"NOERROR","timestamp":"2026-01-01T00:00:00+00:00"}
@@ -261,10 +269,7 @@ All error responses follow this JSON structure:
 | 3000 | 429 Too Many Requests | Rate limit exceeded |
 | 4001 | 401 Unauthorized | Invalid/missing API key |
 | 5001 | 503 Service Unavailable | Circuit breaker open |
-| 2400 | 500 Internal Server Error | Configuration/copy error |
-| 2401 | 500 Internal Server Error | Factory initialization error |
 | 2402 | 500 Internal Server Error | Lookup execution error |
-| 2403 | 500 Internal Server Error | Factory finalization error |
 | 5000 | 500 Internal Server Error | Internal server error |
 
 ---
@@ -455,11 +460,11 @@ Get the results of a completed job (NDJSON format).
 - **Rate Limited**: Yes (if enabled)
 - **Content-Type**: `application/x-ndjson`
 
-**Response (if completed):**
+**Response (if completed):** Same result format as `POST /job` — `v2` nested by default, `v1` flat with `--output-format=v1`.
 ```ndjson
-{"name":"example.com","status":"NOERROR","data":{"answers":[{"answer":"93.184.216.34","type":"A"}]}}
-{"name":"example.org","status":"NOERROR","data":{"answers":[{"answer":"93.184.216.34","type":"A"}]}}
-{"name":"example.net","status":"NOERROR","data":{"answers":[{"answer":"93.184.216.34","type":"A"}]}}
+{"name":"example.com","results":{"A":{"status":"NOERROR","data":{"answers":[{"answer":"93.184.216.34","type":"A"}]}}}}
+{"name":"example.org","results":{"A":{"status":"NOERROR","data":{"answers":[{"answer":"93.184.216.34","type":"A"}]}}}}
+{"name":"example.net","results":{"A":{"status":"NOERROR","data":{"answers":[{"answer":"93.184.216.34","type":"A"}]}}}}
 ```
 
 **Response (if still processing - 202 Accepted):**

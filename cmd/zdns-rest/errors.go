@@ -30,10 +30,7 @@ var (
 	ErrCircuitBreakerOpen = ErrorCode{Code: 5001, Message: "Service temporarily unavailable due to upstream DNS failures", HTTPStatus: http.StatusServiceUnavailable}
 
 	// Server errors (5xx)
-	ErrCopyConfig      = ErrorCode{Code: 2400, Message: "Failed to copy configuration", HTTPStatus: http.StatusInternalServerError}
-	ErrFactoryInit     = ErrorCode{Code: 2401, Message: "Factory was unable to initialize", HTTPStatus: http.StatusInternalServerError}
-	ErrRunLookups      = ErrorCode{Code: 2402, Message: "Unable to run lookups", HTTPStatus: http.StatusInternalServerError}
-	ErrFactoryFinalize = ErrorCode{Code: 2403, Message: "Factory was unable to finalize", HTTPStatus: http.StatusInternalServerError}
+	ErrRunLookups = ErrorCode{Code: 2402, Message: "Unable to run lookups", HTTPStatus: http.StatusInternalServerError}
 
 	// Job errors
 	ErrJobNotFound   = ErrorCode{Code: 2004, Message: "Job not found", HTTPStatus: http.StatusNotFound}

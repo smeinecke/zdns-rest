@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"regexp"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
@@ -26,8 +26,6 @@ func TestAddDefaultPortToDNSServerName(t *testing.T) {
 	}
 
 	// Initialize regex patterns
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -67,14 +65,11 @@ func TestPrepareConfig(t *testing.T) {
 	GC.LogFilePath = ""
 	GC.IterativeResolution = false
 	GC.LookupAllNameServers = false
-	GC.NameServerMode = false
 	GC.TCPOnly = false
 	GC.UDPOnly = false
 	GC.GoMaxProcs = 0
 
 	// Initialize regex patterns
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
 
 	// This should not panic
 	defer func() {
@@ -115,8 +110,6 @@ func TestLocalAddrParsing(t *testing.T) {
 }
 
 func TestAddDefaultPortToDNSServerName_WithEmptyString(t *testing.T) {
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
 	result := AddDefaultPortToDNSServerName("")
 	if result != ":53" {
 		t.Errorf("AddDefaultPortToDNSServerName(\"\") = %q, want \":53\"", result)
@@ -124,8 +117,6 @@ func TestAddDefaultPortToDNSServerName_WithEmptyString(t *testing.T) {
 }
 
 func TestAddDefaultPortToDNSServerName_CustomPort(t *testing.T) {
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
 	result := AddDefaultPortToDNSServerName("8.8.8.8:5353")
 	if result != "8.8.8.8:5353" {
 		t.Errorf("AddDefaultPortToDNSServerName(\"8.8.8.8:5353\") = %q, want \"8.8.8.8:5353\"", result)
@@ -205,7 +196,7 @@ func TestInitConfig(t *testing.T) {
 func TestInitConfig_WithCustomConfigFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	configFile := tmpDir + "/test-config.yaml"
-	if err := os.WriteFile(configFile, []byte("threads: 500\ntimeout: 20\n"), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte("threads: 500\ntimeout: 20\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -301,7 +292,7 @@ func TestLoadKeyValueConfig(t *testing.T) {
 			if tt.expected != nil || tt.content != "" {
 				tmpDir := t.TempDir()
 				configPath = tmpDir + "/test.conf"
-				if err := os.WriteFile(configPath, []byte(tt.content), 0644); err != nil {
+				if err := os.WriteFile(configPath, []byte(tt.content), 0600); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -332,7 +323,7 @@ func TestLoadKeyValueConfig_BooleanValues(t *testing.T) {
 	content := `rate-limit=true
 cache-enabled=false
 tls=true`
-	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -361,7 +352,7 @@ func TestLoadKeyValueConfig_EmptyAndCommentOnly(t *testing.T) {
 # No actual configuration
 
 `
-	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -384,7 +375,7 @@ func TestInitConfig_WithConfFile(t *testing.T) {
 	content := `bind-port=9090
 verbosity=5
 rate-limit=false`
-	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -412,7 +403,7 @@ func TestInitConfig_ConfFileAutoDetection(t *testing.T) {
 	tmpDir := t.TempDir()
 	configFile := tmpDir + "/zdns-rest.conf"
 	content := `bind-port=7070`
-	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -434,7 +425,7 @@ func TestInitConfig_EnvFileExtension(t *testing.T) {
 	configFile := tmpDir + "/config.env"
 	content := `bind-port=6060
 verbosity=2`
-	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(configFile, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -459,7 +450,7 @@ func TestLoadKeyValueConfig_MultipleEquals(t *testing.T) {
 	configPath := tmpDir + "/test.conf"
 	content := `cors-origins=http://example.com,https://example.com
 name-servers=8.8.8.8,1.1.1.1`
-	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -487,7 +478,6 @@ func TestPrepareConfig_LogFile(t *testing.T) {
 	GC.LogFilePath = logFile
 	GC.IterativeResolution = false
 	GC.LookupAllNameServers = false
-	GC.NameServerMode = false
 	GC.TCPOnly = false
 	GC.UDPOnly = false
 	GC.GoMaxProcs = 0
@@ -499,9 +489,6 @@ func TestPrepareConfig_LogFile(t *testing.T) {
 	AC.IterationTimeout = 4
 	AC.Class_string = "INET"
 	AC.NanoSeconds = false
-
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -517,9 +504,6 @@ func TestPrepareConfig_LogFile(t *testing.T) {
 }
 
 func TestPrepareConfig_DifferentVerbosityLevels(t *testing.T) {
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
-
 	tests := []struct {
 		verbosity int
 		wantPanic bool
@@ -539,7 +523,6 @@ func TestPrepareConfig_DifferentVerbosityLevels(t *testing.T) {
 			AC.Localaddr_string = ""
 			AC.Class_string = "INET"
 			GC.IterativeResolution = false
-			GC.NameServerMode = false
 			GC.TCPOnly = false
 			GC.UDPOnly = false
 
@@ -555,9 +538,6 @@ func TestPrepareConfig_DifferentVerbosityLevels(t *testing.T) {
 }
 
 func TestPrepareConfig_DifferentClasses(t *testing.T) {
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
-
 	tests := []struct {
 		class   string
 		wantErr bool
@@ -581,7 +561,6 @@ func TestPrepareConfig_DifferentClasses(t *testing.T) {
 			AC.Servers_string = ""
 			AC.Localaddr_string = ""
 			GC.IterativeResolution = false
-			GC.NameServerMode = false
 			GC.TCPOnly = false
 			GC.UDPOnly = false
 
@@ -597,15 +576,11 @@ func TestPrepareConfig_DifferentClasses(t *testing.T) {
 }
 
 func TestPrepareConfig_Nanoseconds(t *testing.T) {
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
-
 	GC.Verbosity = 4
 	AC.NanoSeconds = true
 	AC.Servers_string = ""
 	AC.Class_string = "INET"
 	GC.IterativeResolution = false
-	GC.NameServerMode = false
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -619,17 +594,13 @@ func TestPrepareConfig_Nanoseconds(t *testing.T) {
 func TestPrepareConfig_WithNameServers(t *testing.T) {
 	tmpDir := t.TempDir()
 	serversFile := tmpDir + "/servers.txt"
-	if err := os.WriteFile(serversFile, []byte("8.8.8.8\n1.1.1.1\n"), 0644); err != nil {
+	if err := os.WriteFile(serversFile, []byte("8.8.8.8\n1.1.1.1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
 
 	GC.Verbosity = 4
 	AC.Servers_string = "@" + serversFile
 	AC.Class_string = "INET"
-	GC.NameServerMode = false
 	GC.IterativeResolution = false
 
 	defer func() {
@@ -649,9 +620,6 @@ func TestPrepareConfig_WithNameServers(t *testing.T) {
 }
 
 func TestPrepareConfig_WithLocalAddr(t *testing.T) {
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
-
 	// Reset global state
 	GC.LocalAddrs = nil
 	GC.LocalAddrSpecified = false
@@ -661,7 +629,6 @@ func TestPrepareConfig_WithLocalAddr(t *testing.T) {
 	AC.Localaddr_string = "127.0.0.1,::1"
 	AC.Class_string = "INET"
 	GC.IterativeResolution = false
-	GC.NameServerMode = false
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -681,15 +648,11 @@ func TestPrepareConfig_WithLocalAddr(t *testing.T) {
 }
 
 func TestPrepareConfig_GoMaxProcs(t *testing.T) {
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
-
 	GC.Verbosity = 4
 	GC.GoMaxProcs = 4
 	AC.Servers_string = ""
 	AC.Class_string = "INET"
 	GC.IterativeResolution = false
-	GC.NameServerMode = false
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -701,13 +664,9 @@ func TestPrepareConfig_GoMaxProcs(t *testing.T) {
 }
 
 func TestPrepareConfig_WithNameServersFromString(t *testing.T) {
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
-
 	GC.Verbosity = 4
 	AC.Servers_string = "8.8.8.8,1.1.1.1"
 	AC.Class_string = "INET"
-	GC.NameServerMode = false
 	GC.IterativeResolution = false
 
 	defer func() {
@@ -727,14 +686,10 @@ func TestPrepareConfig_WithNameServersFromString(t *testing.T) {
 }
 
 func TestPrepareConfig_IterativeResolution(t *testing.T) {
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
-
 	GC.Verbosity = 4
 	AC.Servers_string = ""
 	AC.Class_string = "INET"
 	GC.IterativeResolution = true
-	GC.NameServerMode = false
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -751,14 +706,10 @@ func TestPrepareConfig_IterativeResolution(t *testing.T) {
 }
 
 func TestPrepareConfig_TCPOnlyAndUDPOnly(t *testing.T) {
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
-
 	GC.Verbosity = 4
 	AC.Servers_string = ""
 	AC.Class_string = "INET"
 	GC.IterativeResolution = false
-	GC.NameServerMode = false
 	GC.TCPOnly = true
 	GC.UDPOnly = false
 
@@ -784,15 +735,11 @@ func TestPrepareConfig_TCPOnlyAndUDPOnly(t *testing.T) {
 }
 
 func TestPrepareConfig_LookupAllNameServers(t *testing.T) {
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
-
 	GC.Verbosity = 4
 	AC.Servers_string = ""
 	AC.Class_string = "INET"
 	GC.IterativeResolution = false
 	GC.LookupAllNameServers = true
-	GC.NameServerMode = false
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -801,4 +748,37 @@ func TestPrepareConfig_LookupAllNameServers(t *testing.T) {
 	}()
 
 	prepareConfig()
+}
+
+func TestBindFlags_EnvVarNonDashed(t *testing.T) {
+	// Regression: flags without dashes (--threads) were never bound to env
+	// vars (ZDNS_THREADS) because BindEnv only ran for dashed names.
+	cmd := &cobra.Command{Use: "t"}
+	var threads int
+	cmd.Flags().IntVar(&threads, "threads", 0, "")
+
+	v := viper.New()
+	t.Setenv("ZDNS_TEST_THREADS", "777")
+
+	BindFlags(cmd, v, "ZDNS_TEST")
+
+	if threads != 777 {
+		t.Errorf("threads = %d after ZDNS_TEST_THREADS=777, want 777", threads)
+	}
+}
+
+func TestBindFlags_ListValue(t *testing.T) {
+	// YAML list values must be joined, not formatted as "[a b]".
+	cmd := &cobra.Command{Use: "t"}
+	var servers string
+	cmd.Flags().StringVar(&servers, "name-servers", "", "")
+
+	v := viper.New()
+	v.Set("name-servers", []interface{}{"8.8.8.8", "1.1.1.1"})
+
+	BindFlags(cmd, v, "ZDNS_TEST")
+
+	if servers != "8.8.8.8,1.1.1.1" {
+		t.Errorf("name-servers = %q, want %q", servers, "8.8.8.8,1.1.1.1")
+	}
 }

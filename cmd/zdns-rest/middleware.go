@@ -3,7 +3,6 @@ package main
 import (
 	"net/http"
 	"runtime"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -36,11 +35,4 @@ func RecoverMiddleware(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(w, r)
 	})
-}
-
-// TimeoutMiddleware adds a request-level timeout
-func TimeoutMiddleware(timeout time.Duration) Middleware {
-	return func(next http.Handler) http.Handler {
-		return http.TimeoutHandler(next, timeout, `{"code":5002,"message":"Request timeout"}`)
-	}
 }

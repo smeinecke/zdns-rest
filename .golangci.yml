@@ -1,0 +1,27 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - perfsprint
+    - staticcheck
+    - unconvert
+    - unused
+    - usestdlibvars
+    - whitespace
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

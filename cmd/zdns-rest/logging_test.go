@@ -12,10 +12,10 @@ func TestLoggingMiddleware(t *testing.T) {
 	handler := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
-	}))
+	}), nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/test", nil)
+	r := httptest.NewRequest(http.MethodGet, "/test", nil)
 	r.Header.Set("X-Request-ID", "test-request-id")
 
 	handler.ServeHTTP(w, r)
@@ -34,10 +34,10 @@ func TestLoggingMiddleware(t *testing.T) {
 func TestLoggingMiddleware_GeneratesRequestID(t *testing.T) {
 	handler := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-	}))
+	}), nil)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/job", nil)
+	r := httptest.NewRequest(http.MethodPost, "/job", nil)
 
 	handler.ServeHTTP(w, r)
 
@@ -65,34 +65,53 @@ func TestGenerateRequestID(t *testing.T) {
 }
 
 func TestGetClientIP_FromHeader(t *testing.T) {
-	r := httptest.NewRequest("GET", "/test", nil)
+	r := httptest.NewRequest(http.MethodGet, "/test", nil)
 	r.Header.Set("X-Forwarded-For", "1.2.3.4")
 	r.RemoteAddr = "10.0.0.1:1234"
 
-	ip := getClientIP(r)
+	ip := getClientIP(r, parseTrustedProxies("10.0.0.0/8"))
 	if ip != "1.2.3.4" {
 		t.Errorf("getClientIP from X-Forwarded-For = %q, want %q", ip, "1.2.3.4")
 	}
 }
 
+func TestGetClientIP_UntrustedPeerIgnoresHeaders(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/test", nil)
+	r.Header.Set("X-Forwarded-For", "1.2.3.4")
+	r.Header.Set("X-Real-Ip", "5.6.7.8")
+	r.RemoteAddr = "192.0.2.1:1234"
+
+	// No trusted proxies configured: forged headers must be ignored.
+	ip := getClientIP(r, nil)
+	if ip != "192.0.2.1" {
+		t.Errorf("getClientIP with untrusted peer = %q, want %q", ip, "192.0.2.1")
+	}
+
+	// A non-matching trusted list must not unlock the headers either.
+	ip = getClientIP(r, parseTrustedProxies("203.0.113.0/24"))
+	if ip != "192.0.2.1" {
+		t.Errorf("getClientIP with non-matching proxy list = %q, want %q", ip, "192.0.2.1")
+	}
+}
+
 func TestGetClientIP_FromRealIP(t *testing.T) {
-	r := httptest.NewRequest("GET", "/test", nil)
+	r := httptest.NewRequest(http.MethodGet, "/test", nil)
 	r.Header.Set("X-Real-Ip", "5.6.7.8")
 	r.RemoteAddr = "10.0.0.1:1234"
 
-	ip := getClientIP(r)
+	ip := getClientIP(r, parseTrustedProxies("10.0.0.1"))
 	if ip != "5.6.7.8" {
 		t.Errorf("getClientIP from X-Real-Ip = %q, want %q", ip, "5.6.7.8")
 	}
 }
 
 func TestGetClientIP_FromRemoteAddr(t *testing.T) {
-	r := httptest.NewRequest("GET", "/test", nil)
+	r := httptest.NewRequest(http.MethodGet, "/test", nil)
 	r.RemoteAddr = "10.0.0.1:1234"
 
-	ip := getClientIP(r)
-	if ip != "10.0.0.1:1234" {
-		t.Errorf("getClientIP from RemoteAddr = %q, want %q", ip, "10.0.0.1:1234")
+	ip := getClientIP(r, nil)
+	if ip != "10.0.0.1" {
+		t.Errorf("getClientIP from RemoteAddr = %q, want %q", ip, "10.0.0.1")
 	}
 }
 
@@ -155,7 +174,7 @@ func TestMetricsMiddleware(t *testing.T) {
 	}))
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/job", nil)
+	r := httptest.NewRequest(http.MethodGet, "/job", nil)
 
 	handler.ServeHTTP(w, r)
 
@@ -207,7 +226,7 @@ func TestRecoverMiddleware(t *testing.T) {
 	}))
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/test", nil)
+	r := httptest.NewRequest(http.MethodGet, "/test", nil)
 
 	handler.ServeHTTP(w, r)
 
@@ -228,7 +247,7 @@ func TestRecoverMiddleware_NoPanic(t *testing.T) {
 	}))
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/test", nil)
+	r := httptest.NewRequest(http.MethodGet, "/test", nil)
 
 	handler.ServeHTTP(w, r)
 

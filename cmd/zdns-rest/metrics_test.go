@@ -5,13 +5,16 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestMetricsHandler(t *testing.T) {
 	handler := MetricsHandler()
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/metrics", nil)
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	handler.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
@@ -21,6 +24,26 @@ func TestMetricsHandler(t *testing.T) {
 	contentType := w.Header().Get("Content-Type")
 	if !strings.HasPrefix(contentType, "text/plain") {
 		t.Errorf("Content-Type = %q, want text/plain prefix", contentType)
+	}
+}
+
+// TestMetricsMiddleware_RouteTemplate guards against a regression where the
+// metrics middleware runs outside the router and mux.CurrentRoute is never
+// populated — which would collapse every request onto path="unmatched".
+func TestMetricsMiddleware_RouteTemplate(t *testing.T) {
+	r := mux.NewRouter()
+	r.HandleFunc("/jobs/{job_id}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	r.Use(mux.MiddlewareFunc(MetricsMiddleware))
+
+	before := testutil.ToFloat64(requestCounter.WithLabelValues("GET", "/jobs/{job_id}", "200"))
+
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/jobs/job-9999", nil))
+
+	after := testutil.ToFloat64(requestCounter.WithLabelValues("GET", "/jobs/{job_id}", "200"))
+	if after != before+1 {
+		t.Fatalf("requestCounter for route template /jobs/{job_id} = %v, want %v", after, before+1)
 	}
 }
 

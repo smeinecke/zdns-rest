@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -88,9 +89,23 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 		duration := time.Since(start).Seconds()
 		status := strconv.Itoa(wrapped.statusCode)
 
-		requestCounter.WithLabelValues(r.Method, r.URL.Path, status).Inc()
-		requestDuration.WithLabelValues(r.URL.Path).Observe(duration)
+		path := routePathTemplate(r)
+
+		requestCounter.WithLabelValues(r.Method, path, status).Inc()
+		requestDuration.WithLabelValues(path).Observe(duration)
 	})
+}
+
+// routePathTemplate returns the mux route template for the request, keeping
+// the Prometheus path label cardinality bounded (e.g. "/jobs/{job_id}"
+// instead of "/jobs/job-1234-1").
+func routePathTemplate(r *http.Request) string {
+	if route := mux.CurrentRoute(r); route != nil {
+		if tpl, err := route.GetPathTemplate(); err == nil {
+			return tpl
+		}
+	}
+	return "unmatched"
 }
 
 // responseRecorder wraps http.ResponseWriter to capture the status code

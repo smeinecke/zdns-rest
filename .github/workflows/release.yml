@@ -13,11 +13,18 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write        # OIDC for build provenance attestations
+  attestations: write    # publish attestations to the repo's attestation store
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   prepare:
     name: Prepare Release Metadata
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
@@ -58,6 +65,7 @@ jobs:
   build-binaries:
     name: Build Binaries
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: prepare
     strategy:
       matrix:
@@ -75,14 +83,26 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
 
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          CGO_ENABLED=0 go build -ldflags="-s -w" -o zdns-rest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/zdns-rest
+          go build -trimpath -ldflags="-s -w -X main.buildVersion=${VERSION}" \
+            -o zdns-rest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/zdns-rest
+
+      - name: Smoke test linux/amd64 binary
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: ./zdns-rest-linux-amd64 --version | grep -F "${{ needs.prepare.outputs.version }}"
+
+      - name: Attest binary provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: zdns-rest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -91,12 +111,10 @@ jobs:
           path: zdns-rest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
           if-no-files-found: error
 
-      - name: Print SHA256
-        run: sha256sum zdns-rest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
-
   docker:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [prepare, build-binaries]
     strategy:
       matrix:
@@ -115,25 +133,6 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Compute Docker tags
-        id: docker-tags
-        shell: bash
-        run: |
-          TAGS=(
-            "ghcr.io/${{ github.repository }}:latest"
-            "ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.tag }}"
-            "ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.version }}"
-          )
-          if [[ "${{ needs.prepare.outputs.version }}" != "${{ needs.prepare.outputs.major_minor }}" ]]; then
-            TAGS+=("ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.major_minor }}")
-          fi
-
-          {
-            echo 'tags<<EOF'
-            printf '%s\n' "${TAGS[@]}"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
 
       - name: Download matching binary artifact
         uses: actions/download-artifact@v4
@@ -163,9 +162,8 @@ jobs:
           context: .
           file: ./Dockerfile.release
           platforms: ${{ matrix.platform }}
-          push: true
-          tags: ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.tag }}-${{ matrix.goarch }}
-          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          # Push by digest only; the manifest job tags the multi-arch image
+          outputs: type=image,push-by-digest=true,push=true
 
       - name: Verify image contains released binary
         shell: bash
@@ -174,10 +172,17 @@ jobs:
           IMAGE_REF="ghcr.io/${{ github.repository }}@${{ steps.build-image.outputs.digest }}"
           docker pull "$IMAGE_REF"
           docker create --name verify-image "$IMAGE_REF" >/dev/null
-          docker cp verify-image:/root/zdns-rest docker-dist/zdns-rest-from-image
+          docker cp verify-image:/home/zdns/zdns-rest docker-dist/zdns-rest-from-image
           docker rm -f verify-image >/dev/null
           sha256sum docker-dist/zdns-rest-from-image
           cmp -s docker-dist/zdns-rest docker-dist/zdns-rest-from-image
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build-image.outputs.digest }}
+          push-to-registry: true
 
       - name: Export image digest
         shell: bash
@@ -195,6 +200,7 @@ jobs:
   docker-manifest:
     name: Publish Docker Manifest
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [prepare, docker]
     steps:
       - name: Compute Docker tags
@@ -247,6 +253,7 @@ jobs:
   release:
     name: Upload Release Assets
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [prepare, build-binaries]
     steps:
       - name: Download all binaries
@@ -258,11 +265,33 @@ jobs:
       - name: Display structure
         run: ls -R artifacts/
 
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd artifacts/
+          sha256sum */* | awk '{ sub(".*/", "", $2); print }' > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Verify checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts/
+          # Every manifest entry must resolve to exactly one artifact whose
+          # hash matches what will be published.
+          while read -r expected file; do
+            match=$(find . -name "$file" -type f | head -1)
+            [ -n "$match" ] || { echo "missing artifact: $file"; exit 1; }
+            actual=$(sha256sum "$match" | awk '{print $1}')
+            [ "$actual" = "$expected" ] || { echo "checksum mismatch: $file"; exit 1; }
+          done < SHA256SUMS.txt
+          echo "all checksums verified"
+
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ needs.prepare.outputs.tag }}"
-          for f in artifacts/*/*; do
+          for f in artifacts/*/* artifacts/SHA256SUMS.txt; do
             gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber
           done

@@ -4,14 +4,13 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
+	"github.com/zmap/zdns/v2/src/zdns"
 )
 
 func setupJobTestConfig(t *testing.T) {
@@ -24,7 +23,6 @@ func setupJobTestConfig(t *testing.T) {
 	GC.LogFilePath = ""
 	GC.IterativeResolution = false
 	GC.LookupAllNameServers = false
-	GC.NameServerMode = false
 	GC.TCPOnly = false
 	GC.UDPOnly = false
 	GC.GoMaxProcs = 0
@@ -42,24 +40,67 @@ func setupJobTestConfig(t *testing.T) {
 	AC.Class_string = "INET"
 	AC.NanoSeconds = false
 
-	rePort = regexp.MustCompile(`:\d+$`)
-	reV6 = regexp.MustCompile(`^([0-9a-f]*:)`)
 	prepareConfig()
 }
 
-func newIdleJobManager() *JobManager {
+// testConfigSnapshot returns a copy of the current global config under GCMu,
+// suitable for wiring into Server/JobManager instances in tests.
+func testConfigSnapshot() GlobalConf {
+	GCMu.RLock()
+	defer GCMu.RUnlock()
+	return GC
+}
+
+// testCfgPtr returns a fresh pointer to a config snapshot.
+func testCfgPtr() *GlobalConf {
+	cfg := testConfigSnapshot()
+	return &cfg
+}
+
+// newTestEngine builds a lookupEngine from a config snapshot. Falls back to
+// zdns defaults when the resolver config can't be built (e.g. resolv.conf
+// missing in the test environment).
+func newTestEngine(cfg *GlobalConf) *lookupEngine {
+	rc, err := buildResolverConfig(cfg, AC.Config_file)
+	if err != nil {
+		rc = zdns.NewResolverConfig()
+	}
+	return &lookupEngine{
+		cfg:     cfg,
+		rc:      rc,
+		modules: initLookupModules(cfg, rc),
+	}
+}
+
+// newTestServer returns a Server built from the current global config
+// (snapshot under GCMu) with an idle job manager.
+func newTestServer() *Server {
+	cfg := testConfigSnapshot()
+	engine := newTestEngine(&cfg)
+	return &Server{
+		cfg:            cfg,
+		jm:             newIdleJobManager(engine),
+		trustedProxies: parseTrustedProxies(cfg.TrustedProxies),
+		engine:         engine,
+	}
+}
+
+func newIdleJobManager(engine *lookupEngine) *JobManager {
+	cfg := testConfigSnapshot()
 	return &JobManager{
 		jobs:        make(map[string]*Job),
 		workerCount: 1,
 		jobQueue:    make(chan *Job, 1000),
 		shutdown:    make(chan struct{}),
+		cfg:         &cfg,
+		engine:      engine,
 	}
 }
 
 func TestNewJobManager(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := NewJobManager(5)
+	jm := NewJobManager(5, nil, nil, nil)
 	assert.NotNil(t, jm)
 	assert.Equal(t, 5, jm.workerCount)
 	assert.NotNil(t, jm.jobs)
@@ -72,7 +113,7 @@ func TestNewJobManager(t *testing.T) {
 func TestNewJobManager_DefaultWorkers(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := NewJobManager(0)
+	jm := NewJobManager(0, nil, nil, nil)
 	assert.Equal(t, 10, jm.workerCount)
 	jm.Stop()
 }
@@ -80,7 +121,7 @@ func TestNewJobManager_DefaultWorkers(t *testing.T) {
 func TestJobManager_SubmitJob(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	queries := []string{"example.com", "example.org"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -107,7 +148,7 @@ func TestJobManager_SubmitJob(t *testing.T) {
 func TestJobManager_GetJob_NotFound(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	job := jm.GetJob("nonexistent-id")
 	assert.Nil(t, job)
@@ -116,7 +157,7 @@ func TestJobManager_GetJob_NotFound(t *testing.T) {
 func TestJobManager_GetJobStatus(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -132,7 +173,7 @@ func TestJobManager_GetJobStatus(t *testing.T) {
 func TestJobManager_GetJobStatus_NotFound(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	_, _, _, err := jm.GetJobStatus("nonexistent-id")
 	assert.Error(t, err)
@@ -142,7 +183,7 @@ func TestJobManager_GetJobStatus_NotFound(t *testing.T) {
 func TestJobManager_GetJobResults_NotComplete(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -156,7 +197,7 @@ func TestJobManager_GetJobResults_NotComplete(t *testing.T) {
 func TestJobManager_GetJobResults_NotFound(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	results, err := jm.GetJobResults("nonexistent-id")
 	assert.Error(t, err)
@@ -167,7 +208,7 @@ func TestJobManager_GetJobResults_NotFound(t *testing.T) {
 func TestJobManager_CancelJob(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -186,7 +227,7 @@ func TestJobManager_CancelJob(t *testing.T) {
 func TestJobManager_CancelJob_NotFound(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	err := jm.CancelJob("nonexistent-id")
 	assert.Error(t, err)
@@ -196,7 +237,7 @@ func TestJobManager_CancelJob_NotFound(t *testing.T) {
 func TestJobManager_CancelJob_AlreadyCompleted(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -215,7 +256,7 @@ func TestJobManager_CancelJob_AlreadyCompleted(t *testing.T) {
 func TestJobManager_ListJobs(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	// Submit multiple jobs
 	job1 := jm.SubmitJob("A", []string{"example.com"}, "8.8.8.8:53")
@@ -235,7 +276,7 @@ func TestJobManager_ListJobs(t *testing.T) {
 func TestJobManager_CleanupOldJobs(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	// Create a job and manually set it as completed with old creation time
 	queries := []string{"example.com"}
@@ -259,7 +300,7 @@ func TestJobManager_CleanupOldJobs(t *testing.T) {
 func TestJobManager_CleanupOldJobs_DoesNotRemoveRecent(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -282,7 +323,7 @@ func TestJobManager_CleanupOldJobs_DoesNotRemoveRecent(t *testing.T) {
 func TestJobManager_CleanupOldJobs_DoesNotRemoveRunning(t *testing.T) {
 	setupJobTestConfig(t)
 
-	jm := newIdleJobManager()
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
 
 	queries := []string{"example.com"}
 	job := jm.SubmitJob("A", queries, "8.8.8.8:53")
@@ -343,30 +384,31 @@ func TestJobStruct_JSONTags(t *testing.T) {
 	assert.NotNil(t, job.Metadata)
 }
 
-func TestJobOutputHandler_WriteResults(t *testing.T) {
+func TestResultSink_JobProgress(t *testing.T) {
 	InitCache(true, 100, time.Hour)
 	defer InitCache(false, 0, 0)
 
 	job := &Job{}
 	collector := NewOrderedResultCollector()
-	handler := &JobOutputHandler{
-		job:        job,
+	sink := &resultSink{
+		requestID:  job.ID,
 		module:     "A",
 		nameserver: "8.8.8.8:53",
 		collector:  collector,
+		start:      time.Now(),
+		onResult: func() {
+			job.mu.Lock()
+			job.Progress++
+			job.mu.Unlock()
+		},
 	}
 
 	results := make(chan string, 1)
 	results <- `{"name":"example.com","status":"NOERROR"}`
 	close(results)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	sink.consume(results)
 
-	err := handler.WriteResults(results, &wg)
-	wg.Wait()
-
-	assert.NoError(t, err)
 	collected := collector.Ordered([]string{"example.com"})
 	assert.Equal(t, 1, len(collected))
 	assert.Equal(t, 1, job.Progress)
@@ -376,20 +418,15 @@ func TestJobOutputHandler_WriteResults(t *testing.T) {
 	assert.Equal(t, collected[0], entry.Result)
 }
 
-func TestBuildQueryInput(t *testing.T) {
-	assert.Equal(t, "example.com\nexample.org\n", buildQueryInput([]string{"example.com", "example.org"}))
-	assert.Equal(t, "", buildQueryInput(nil))
-}
-
 func TestCreateJobRequest(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
 	body := `{"module":"A","queries":["example.com"]}`
-	r := httptest.NewRequest("POST", "/jobs", strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
-	createJobRequest(w, r)
+	s.createJobRequest(w, r)
 
 	assert.Equal(t, http.StatusAccepted, w.Code)
 	assert.Contains(t, w.Body.String(), "job_id")
@@ -398,58 +435,58 @@ func TestCreateJobRequest(t *testing.T) {
 
 func TestCreateJobRequest_InvalidJSON(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
-	r := httptest.NewRequest("POST", "/jobs", strings.NewReader("not-json"))
+	r := httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader("not-json"))
 	w := httptest.NewRecorder()
 
-	createJobRequest(w, r)
+	s.createJobRequest(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestCreateJobRequest_EmptyQueries(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
 	body := `{"module":"A","queries":[]}`
-	r := httptest.NewRequest("POST", "/jobs", strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
-	createJobRequest(w, r)
+	s.createJobRequest(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestCreateJobRequest_InvalidModule(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
 	body := `{"module":"INVALID","queries":["example.com"]}`
-	r := httptest.NewRequest("POST", "/jobs", strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
-	createJobRequest(w, r)
+	s.createJobRequest(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestCreateJobRequest_InvalidDomain(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
 	body := `{"module":"A","queries":["not-a-domain!"]}`
-	r := httptest.NewRequest("POST", "/jobs", strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
-	createJobRequest(w, r)
+	s.createJobRequest(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestGetJobRequest(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
 	job := &Job{
 		ID:       "job-123",
@@ -458,13 +495,13 @@ func TestGetJobRequest(t *testing.T) {
 		Total:    2,
 		Progress: 1,
 	}
-	jobManager.jobs[job.ID] = job
+	s.jm.jobs[job.ID] = job
 
-	r := httptest.NewRequest("GET", "/jobs/job-123", nil)
+	r := httptest.NewRequest(http.MethodGet, "/jobs/job-123", nil)
 	r = mux.SetURLVars(r, map[string]string{"job_id": "job-123"})
 	w := httptest.NewRecorder()
 
-	getJobRequest(w, r)
+	s.getJobRequest(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "job-123")
@@ -473,20 +510,20 @@ func TestGetJobRequest(t *testing.T) {
 
 func TestGetJobRequest_NotFound(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
-	r := httptest.NewRequest("GET", "/jobs/unknown", nil)
+	r := httptest.NewRequest(http.MethodGet, "/jobs/unknown", nil)
 	r = mux.SetURLVars(r, map[string]string{"job_id": "unknown"})
 	w := httptest.NewRecorder()
 
-	getJobRequest(w, r)
+	s.getJobRequest(w, r)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
 func TestGetJobResultsRequest_CompletedJob(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
 	job := &Job{
 		ID:      "job-done",
@@ -494,13 +531,13 @@ func TestGetJobResultsRequest_CompletedJob(t *testing.T) {
 		Total:   1,
 		Results: []string{`{"name":"example.com"}`},
 	}
-	jobManager.jobs[job.ID] = job
+	s.jm.jobs[job.ID] = job
 
-	r := httptest.NewRequest("GET", "/jobs/job-done/results", nil)
+	r := httptest.NewRequest(http.MethodGet, "/jobs/job-done/results", nil)
 	r = mux.SetURLVars(r, map[string]string{"job_id": "job-done"})
 	w := httptest.NewRecorder()
 
-	getJobResultsRequest(w, r)
+	s.getJobResultsRequest(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "example.com")
@@ -508,7 +545,7 @@ func TestGetJobResultsRequest_CompletedJob(t *testing.T) {
 
 func TestGetJobResultsRequest_RunningJob(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
 	job := &Job{
 		ID:       "job-running",
@@ -516,13 +553,13 @@ func TestGetJobResultsRequest_RunningJob(t *testing.T) {
 		Total:    5,
 		Progress: 2,
 	}
-	jobManager.jobs[job.ID] = job
+	s.jm.jobs[job.ID] = job
 
-	r := httptest.NewRequest("GET", "/jobs/job-running/results", nil)
+	r := httptest.NewRequest(http.MethodGet, "/jobs/job-running/results", nil)
 	r = mux.SetURLVars(r, map[string]string{"job_id": "job-running"})
 	w := httptest.NewRecorder()
 
-	getJobResultsRequest(w, r)
+	s.getJobResultsRequest(w, r)
 
 	assert.Equal(t, http.StatusAccepted, w.Code)
 	assert.Contains(t, w.Body.String(), "still processing")
@@ -530,20 +567,20 @@ func TestGetJobResultsRequest_RunningJob(t *testing.T) {
 
 func TestGetJobResultsRequest_NotFound(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
-	r := httptest.NewRequest("GET", "/jobs/unknown/results", nil)
+	r := httptest.NewRequest(http.MethodGet, "/jobs/unknown/results", nil)
 	r = mux.SetURLVars(r, map[string]string{"job_id": "unknown"})
 	w := httptest.NewRecorder()
 
-	getJobResultsRequest(w, r)
+	s.getJobResultsRequest(w, r)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
 func TestCancelJobRequest(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	job := &Job{
@@ -552,13 +589,13 @@ func TestCancelJobRequest(t *testing.T) {
 		ctx:    ctx,
 		cancel: cancel,
 	}
-	jobManager.jobs[job.ID] = job
+	s.jm.jobs[job.ID] = job
 
-	r := httptest.NewRequest("DELETE", "/jobs/job-cancel", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/jobs/job-cancel", nil)
 	r = mux.SetURLVars(r, map[string]string{"job_id": "job-cancel"})
 	w := httptest.NewRecorder()
 
-	cancelJobRequest(w, r)
+	s.cancelJobRequest(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "Job cancelled")
@@ -566,20 +603,20 @@ func TestCancelJobRequest(t *testing.T) {
 
 func TestCancelJobRequest_NotFound(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
-	r := httptest.NewRequest("DELETE", "/jobs/unknown", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/jobs/unknown", nil)
 	r = mux.SetURLVars(r, map[string]string{"job_id": "unknown"})
 	w := httptest.NewRecorder()
 
-	cancelJobRequest(w, r)
+	s.cancelJobRequest(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestListJobsRequest(t *testing.T) {
 	setupJobTestConfig(t)
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 
 	job1 := &Job{
 		ID:     "job-1",
@@ -593,13 +630,13 @@ func TestListJobsRequest(t *testing.T) {
 		Module: "MX",
 		Total:  2,
 	}
-	jobManager.jobs[job1.ID] = job1
-	jobManager.jobs[job2.ID] = job2
+	s.jm.jobs[job1.ID] = job1
+	s.jm.jobs[job2.ID] = job2
 
-	r := httptest.NewRequest("GET", "/jobs", nil)
+	r := httptest.NewRequest(http.MethodGet, "/jobs", nil)
 	w := httptest.NewRecorder()
 
-	listJobsRequest(w, r)
+	s.listJobsRequest(w, r)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
@@ -610,7 +647,7 @@ func TestListJobsRequest(t *testing.T) {
 }
 
 func TestGetJobResultsRequest_FailedJob(t *testing.T) {
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 	job := &Job{
 		ID:       "job-failed",
 		Status:   JobFailed,
@@ -618,13 +655,13 @@ func TestGetJobResultsRequest_FailedJob(t *testing.T) {
 		Total:    2,
 		Error:    "lookup failed",
 	}
-	jobManager.jobs[job.ID] = job
+	s.jm.jobs[job.ID] = job
 
-	r := httptest.NewRequest("GET", "/jobs/"+job.ID+"/results", nil)
+	r := httptest.NewRequest(http.MethodGet, "/jobs/"+job.ID+"/results", nil)
 	r = mux.SetURLVars(r, map[string]string{"job_id": job.ID})
 	w := httptest.NewRecorder()
 
-	getJobResultsRequest(w, r)
+	s.getJobResultsRequest(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "lookup failed")
@@ -632,22 +669,92 @@ func TestGetJobResultsRequest_FailedJob(t *testing.T) {
 }
 
 func TestGetJobResultsRequest_CancelledJob(t *testing.T) {
-	jobManager = newIdleJobManager()
+	s := newTestServer()
 	job := &Job{
 		ID:       "job-cancelled",
 		Status:   JobCancelled,
 		Progress: 1,
 		Total:    2,
 	}
-	jobManager.jobs[job.ID] = job
+	s.jm.jobs[job.ID] = job
 
-	r := httptest.NewRequest("GET", "/jobs/"+job.ID+"/results", nil)
+	r := httptest.NewRequest(http.MethodGet, "/jobs/"+job.ID+"/results", nil)
 	r = mux.SetURLVars(r, map[string]string{"job_id": job.ID})
 	w := httptest.NewRecorder()
 
-	getJobResultsRequest(w, r)
+	s.getJobResultsRequest(w, r)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "cancelled")
 	assert.NotContains(t, w.Body.String(), "still processing")
+}
+
+func TestNewJobManager_ConfigAndStop(t *testing.T) {
+	cfg := testConfigSnapshot()
+	jm := NewJobManager(2, &cfg, nil, nil)
+
+	if jm.workerCount != 2 {
+		t.Errorf("workerCount = %d, want 2", jm.workerCount)
+	}
+	if jm.cfg != &cfg {
+		t.Error("jm.cfg does not point at the supplied config")
+	}
+
+	// Stop must be safe to call more than once
+	jm.Stop()
+	jm.Stop()
+}
+
+func TestProcessJob_InvalidModule(t *testing.T) {
+	setupJobTestConfig(t)
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
+
+	job := jm.SubmitJob("NOSUCHMODULE", []string{"example.com"}, "")
+	jm.processJob(job)
+
+	status, _, _, err := jm.GetJobStatus(job.ID)
+	assert.NoError(t, err)
+	assert.Equal(t, JobFailed, status)
+
+	job.mu.RLock()
+	defer job.mu.RUnlock()
+	assert.Contains(t, job.Error, "Invalid lookup module")
+	assert.NotNil(t, job.CompletedAt)
+}
+
+func TestProcessJob_FullyCached(t *testing.T) {
+	setupJobTestConfig(t)
+	GC.CacheSize = 100
+
+	InitCache(true, 100, time.Minute)
+	GetCache().Set("A", "example.com", "", `{"name":"example.com","status":"NOERROR"}`)
+
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
+	job := jm.SubmitJob("A", []string{"example.com"}, "")
+	jm.processJob(job)
+
+	status, _, _, err := jm.GetJobStatus(job.ID)
+	assert.NoError(t, err)
+	assert.Equal(t, JobCompleted, status)
+
+	results, err := jm.GetJobResults(job.ID)
+	assert.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.Contains(t, results[0], "example.com")
+}
+
+func TestProcessJob_CancelledWhileQueued(t *testing.T) {
+	setupJobTestConfig(t)
+	jm := newIdleJobManager(newTestEngine(testCfgPtr()))
+
+	job := jm.SubmitJob("A", []string{"example.com"}, "8.8.8.8:53")
+
+	// Cancel before a worker picks it up
+	assert.NoError(t, jm.CancelJob(job.ID))
+
+	jm.processJob(job)
+
+	status, _, _, err := jm.GetJobStatus(job.ID)
+	assert.NoError(t, err)
+	assert.Equal(t, JobCancelled, status)
 }

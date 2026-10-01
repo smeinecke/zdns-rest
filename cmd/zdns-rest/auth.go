@@ -1,15 +1,32 @@
 package main
 
 import (
+	"crypto/subtle"
+	"net"
 	"net/http"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
 )
 
+// publicPaths are endpoints that never require authentication or count
+// against rate limits (health probes, metrics).
+var publicPaths = map[string]bool{
+	"/ping":    true,
+	"/health":  true,
+	"/ready":   true,
+	"/metrics": true,
+}
+
+// isPublicPath reports whether the given request path is a public endpoint.
+func isPublicPath(path string) bool {
+	return publicPaths[strings.TrimSuffix(path, "/")]
+}
+
 // AuthMiddleware wraps an HTTP handler with API key authentication
-// If apiKey is empty, authentication is disabled
-func AuthMiddleware(next http.Handler, apiKey string) http.Handler {
+// If apiKey is empty, authentication is disabled. trustedProxies controls
+// whether forwarded headers are honored when logging the client IP.
+func AuthMiddleware(next http.Handler, apiKey string, trustedProxies []*net.IPNet) http.Handler {
 	if apiKey == "" {
 		log.Info("API key authentication disabled")
 		return next
@@ -17,21 +34,26 @@ func AuthMiddleware(next http.Handler, apiKey string) http.Handler {
 
 	log.Info("API key authentication enabled")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPublicPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		providedKey := extractAPIKey(r)
 
 		if providedKey == "" {
 			authFailures.Inc()
 			log.WithFields(log.Fields{
-				"client_ip": getClientIP(r),
+				"client_ip": getClientIP(r, trustedProxies),
 			}).Warn("API request missing authentication")
 			ErrorResponse(w, ErrUnauthorized, "")
 			return
 		}
 
-		if providedKey != apiKey {
+		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(apiKey)) != 1 {
 			authFailures.Inc()
 			log.WithFields(log.Fields{
-				"client_ip": getClientIP(r),
+				"client_ip": getClientIP(r, trustedProxies),
 			}).Warn("API request with invalid API key")
 			ErrorResponse(w, ErrUnauthorized, "invalid API key")
 			return

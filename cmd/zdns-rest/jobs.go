@@ -3,21 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/jinzhu/copier"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	log "github.com/sirupsen/logrus"
-	"github.com/zmap/zdns/iohandlers"
-	"github.com/zmap/zdns/pkg/zdns"
+	"github.com/zmap/zdns/v2/src/zdns"
 )
 
 // Job metrics
@@ -58,6 +55,12 @@ const (
 	JobCancelled JobStatus = "cancelled"
 )
 
+// jobRetention is how long finished jobs are kept before being cleaned up
+const jobRetention = time.Hour
+
+// jobCleanupInterval is how often old finished jobs are removed
+const jobCleanupInterval = 10 * time.Minute
+
 // Job represents an async DNS lookup job
 type Job struct {
 	ID          string                 `json:"id"`
@@ -88,12 +91,23 @@ type JobManager struct {
 	jobQueue    chan *Job
 	wg          sync.WaitGroup
 	shutdown    chan struct{}
+	stopOnce    sync.Once
+
+	// cfg points at the server's immutable config snapshot; cb is the
+	// server's circuit breaker (nil when the feature is disabled).
+	cfg    *GlobalConf
+	cb     *CircuitBreaker
+	engine *lookupEngine
 }
 
-// NewJobManager creates a new job manager with the specified worker count
-func NewJobManager(workerCount int) *JobManager {
+// NewJobManager creates a new job manager with the specified worker count.
+// cfg must be a stable config snapshot that outlives the manager.
+func NewJobManager(workerCount int, cfg *GlobalConf, cb *CircuitBreaker, engine *lookupEngine) *JobManager {
 	if workerCount <= 0 {
 		workerCount = 10
+	}
+	if cfg == nil {
+		cfg = &GlobalConf{}
 	}
 
 	jm := &JobManager{
@@ -101,6 +115,9 @@ func NewJobManager(workerCount int) *JobManager {
 		workerCount: workerCount,
 		jobQueue:    make(chan *Job, 1000),
 		shutdown:    make(chan struct{}),
+		cfg:         cfg,
+		cb:          cb,
+		engine:      engine,
 	}
 
 	// Start workers
@@ -109,12 +126,46 @@ func NewJobManager(workerCount int) *JobManager {
 		go jm.worker(i)
 	}
 
+	// Periodically remove finished jobs so the job map does not grow forever
+	go func() {
+		ticker := time.NewTicker(jobCleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-jm.shutdown:
+				return
+			case <-ticker.C:
+				if n := jm.CleanupOldJobs(jobRetention); n > 0 {
+					log.Debugf("Cleaned up %d finished jobs", n)
+				}
+			}
+		}
+	}()
+
 	return jm
 }
 
-// Stop shuts down the job manager
+// Stop shuts down the job manager. Pending and running jobs get their
+// contexts cancelled so in-flight DNS queries abort; then workers are
+// stopped. Safe to call more than once.
 func (jm *JobManager) Stop() {
-	close(jm.shutdown)
+	jm.stopOnce.Do(func() {
+		close(jm.shutdown)
+
+		// Cancel every unfinished job — their contexts are detached from the
+		// server lifecycle (30min Background timeout) and would otherwise run
+		// to completion during shutdown.
+		jm.mu.RLock()
+		for _, job := range jm.jobs {
+			job.mu.RLock()
+			unfinished := job.Status == JobPending || job.Status == JobRunning
+			job.mu.RUnlock()
+			if unfinished {
+				job.cancel()
+			}
+		}
+		jm.mu.RUnlock()
+	})
 	jm.wg.Wait()
 }
 
@@ -126,6 +177,14 @@ func (jm *JobManager) worker(id int) {
 	defer log.Debugf("Job worker %d stopped", id)
 
 	for {
+		// Prefer shutdown over draining the queue: when both are ready,
+		// select picks randomly and would keep dequeuing jobs while the
+		// server is trying to exit.
+		select {
+		case <-jm.shutdown:
+			return
+		default:
+		}
 		select {
 		case job := <-jm.jobQueue:
 			if job != nil {
@@ -139,11 +198,39 @@ func (jm *JobManager) worker(id int) {
 
 // processJob executes a DNS lookup job
 func (jm *JobManager) processJob(job *Job) {
+	// A panic inside zdns (or our handlers) must not take down the worker
+	// goroutine or the process — mark the job failed instead.
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.WithFields(log.Fields{
+				"job_id": job.ID,
+				"module": job.Module,
+				"panic":  rec,
+			}).Error("Panic while processing job")
+			job.mu.Lock()
+			job.Status = JobFailed
+			job.Error = fmt.Sprintf("internal error: %v", rec)
+			now := time.Now()
+			job.CompletedAt = &now
+			job.mu.Unlock()
+			jobsTotal.WithLabelValues("failed").Inc()
+		}
+	}()
+
 	job.mu.Lock()
+	if job.Status == JobCancelled {
+		// Job was cancelled while still in the queue
+		job.mu.Unlock()
+		jobsTotal.WithLabelValues("cancelled").Inc()
+		return
+	}
 	job.Status = JobRunning
 	now := time.Now()
 	job.StartedAt = &now
 	job.mu.Unlock()
+
+	// Release the job context resources once processing finishes
+	defer job.cancel()
 
 	jobsActive.Inc()
 	defer jobsActive.Dec()
@@ -160,12 +247,12 @@ func (jm *JobManager) processJob(job *Job) {
 		jobDuration.WithLabelValues(job.Module).Observe(duration)
 	}()
 
-	// Create zdns configuration
-	var gc zdns.GlobalConf
-	if err := copier.Copy(&gc, &GC); err != nil {
+	// The server's config snapshot is immutable; per-job variation is the
+	// optional nameserver override.
+	if _, ok := jm.engine.modules[job.Module]; !ok {
 		job.mu.Lock()
 		job.Status = JobFailed
-		job.Error = fmt.Sprintf("Failed to copy configuration: %v", err)
+		job.Error = "Invalid lookup module: " + job.Module
 		now := time.Now()
 		job.CompletedAt = &now
 		job.mu.Unlock()
@@ -173,8 +260,17 @@ func (jm *JobManager) processJob(job *Job) {
 		return
 	}
 
-	gc.Module = job.Module
-	gc.NameServers = []string{job.Nameserver}
+	// Check circuit breaker before doing any work
+	if jm.cfg.CircuitBreakerEnabled && !jm.cb.CanExecute() {
+		job.mu.Lock()
+		job.Status = JobFailed
+		job.Error = ErrCircuitBreakerOpen.Message
+		now := time.Now()
+		job.CompletedAt = &now
+		job.mu.Unlock()
+		jobsTotal.WithLabelValues("failed").Inc()
+		return
+	}
 
 	// Create input from queries
 	queries := make([]string, len(job.Queries))
@@ -195,33 +291,6 @@ func (jm *JobManager) processJob(job *Job) {
 	default:
 	}
 
-	factory := zdns.GetLookup(gc.Module)
-	if factory == nil {
-		job.mu.Lock()
-		job.Status = JobFailed
-		job.Error = fmt.Sprintf("Invalid lookup module: %s", gc.Module)
-		now := time.Now()
-		job.CompletedAt = &now
-		job.mu.Unlock()
-		jobsTotal.WithLabelValues("failed").Inc()
-		return
-	}
-
-	if GC.Flags != nil {
-		factory.SetFlags(GC.Flags)
-	}
-
-	if err := factory.Initialize(&gc); err != nil {
-		job.mu.Lock()
-		job.Status = JobFailed
-		job.Error = fmt.Sprintf("Factory initialization failed: %v", err)
-		now := time.Now()
-		job.CompletedAt = &now
-		job.mu.Unlock()
-		jobsTotal.WithLabelValues("failed").Inc()
-		return
-	}
-
 	cache := GetCache()
 	uncachedQueries := make([]string, 0, len(queries))
 	for _, query := range queries {
@@ -238,7 +307,7 @@ func (jm *JobManager) processJob(job *Job) {
 		}
 
 		if cache != nil && cache.enabled {
-			if entry := cache.Get(gc.Module, query, job.Nameserver, false); entry != nil {
+			if entry := cache.Get(job.Module, query, job.Nameserver, false); entry != nil {
 				collector.Add(query, entry.Result)
 				job.mu.Lock()
 				job.Progress++
@@ -251,15 +320,46 @@ func (jm *JobManager) processJob(job *Job) {
 	}
 
 	if len(uncachedQueries) > 0 {
-		gc.InputHandler = iohandlers.NewStreamInputHandler(&stringReader{s: buildQueryInput(uncachedQueries)})
-		gc.OutputHandler = &JobOutputHandler{
-			job:        job,
-			module:     gc.Module,
-			nameserver: job.Nameserver,
-			collector:  collector,
+		var ns *zdns.NameServer
+		if job.Nameserver != "" {
+			var err error
+			ns, err = parseNameServer(job.Nameserver)
+			if err != nil {
+				job.mu.Lock()
+				job.Status = JobFailed
+				job.Error = fmt.Sprintf("Invalid nameserver: %v", err)
+				now := time.Now()
+				job.CompletedAt = &now
+				job.mu.Unlock()
+				jobsTotal.WithLabelValues("failed").Inc()
+				return
+			}
 		}
 
-		if err := zdns.DoLookups(factory, &gc); err != nil {
+		results := make(chan string)
+		sink := &resultSink{
+			requestID:  job.ID,
+			module:     job.Module,
+			nameserver: job.Nameserver,
+			collector:  collector,
+			start:      time.Now(),
+			onResult: func() {
+				job.mu.Lock()
+				job.Progress++
+				job.mu.Unlock()
+			},
+		}
+		var outWG sync.WaitGroup
+		outWG.Add(1)
+		go func() {
+			defer outWG.Done()
+			sink.consume(results)
+		}()
+
+		// job.ctx cancels mid-query — v2 checks the context per network call.
+		if err := jm.engine.executeQueries(job.ctx, job.Module, uncachedQueries, ns, results); err != nil {
+			outWG.Wait()
+			jm.cb.recordOutcome(false)
 			job.mu.Lock()
 			job.Status = JobFailed
 			job.Error = fmt.Sprintf("Lookup execution failed: %v", err)
@@ -269,14 +369,10 @@ func (jm *JobManager) processJob(job *Job) {
 			jobsTotal.WithLabelValues("failed").Inc()
 			return
 		}
+		outWG.Wait()
 	}
 
-	if err := factory.Finalize(); err != nil {
-		log.WithFields(log.Fields{
-			"job_id": job.ID,
-			"error":  err,
-		}).Warn("Factory finalization failed")
-	}
+	jm.cb.recordOutcome(true)
 
 	select {
 	case <-job.ctx.Done():
@@ -294,6 +390,15 @@ func (jm *JobManager) processJob(job *Job) {
 	results := collector.Ordered(queries)
 
 	job.mu.Lock()
+	if job.Status == JobCancelled {
+		// CancelJob raced with completion
+		job.Results = results
+		now = time.Now()
+		job.CompletedAt = &now
+		job.mu.Unlock()
+		jobsTotal.WithLabelValues("cancelled").Inc()
+		return
+	}
 	job.Status = JobCompleted
 	job.Results = results
 	now = time.Now()
@@ -308,63 +413,6 @@ func (jm *JobManager) processJob(job *Job) {
 		"count":    len(job.Queries),
 		"duration": time.Since(startTime),
 	}).Info("Job completed")
-}
-
-type JobOutputHandler struct {
-	job        *Job
-	module     string
-	nameserver string
-	collector  *OrderedResultCollector
-}
-
-func (h *JobOutputHandler) WriteResults(results <-chan string, wg *sync.WaitGroup) error {
-	defer wg.Done()
-
-	cache := GetCache()
-	for result := range results {
-		var decoded map[string]interface{}
-		if err := json.Unmarshal([]byte(result), &decoded); err == nil {
-			if name, ok := decoded["name"].(string); ok && h.collector != nil {
-				h.collector.Add(name, result)
-			}
-		}
-
-		if cache != nil && cache.enabled {
-			if name, ok := decoded["name"].(string); ok {
-				cache.Set(h.module, name, h.nameserver, result)
-			}
-		}
-
-		h.job.mu.Lock()
-		h.job.Progress++
-		h.job.mu.Unlock()
-	}
-
-	return nil
-}
-
-func buildQueryInput(queries []string) string {
-	var input strings.Builder
-	for _, q := range queries {
-		input.WriteString(q)
-		input.WriteByte('\n')
-	}
-	return input.String()
-}
-
-// stringReader is a simple string reader for input
-type stringReader struct {
-	s string
-	i int
-}
-
-func (r *stringReader) Read(p []byte) (n int, err error) {
-	if r.i >= len(r.s) {
-		return 0, io.EOF
-	}
-	n = copy(p, r.s[r.i:])
-	r.i += n
-	return n, nil
 }
 
 // SubmitJob creates and queues a new job
@@ -399,6 +447,7 @@ func (jm *JobManager) SubmitJob(module string, queries []string, nameserver stri
 			"count":  len(queries),
 		}).Info("Job submitted")
 	default:
+		job.cancel()
 		job.mu.Lock()
 		job.Status = JobFailed
 		job.Error = "Job queue is full"
@@ -418,23 +467,51 @@ func (jm *JobManager) GetJob(id string) *Job {
 	return jm.jobs[id]
 }
 
+// jobSnapshot is a consistent point-in-time copy of a Job's mutable fields.
+type jobSnapshot struct {
+	Status      JobStatus
+	Progress    int
+	Total       int
+	Error       string
+	Metadata    map[string]interface{}
+	CreatedAt   time.Time
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+}
+
+// snapshot copies the mutable fields under the job lock; ID/Module/Queries
+// are immutable and safe to read directly.
+func (j *Job) snapshot() jobSnapshot {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return jobSnapshot{
+		Status:      j.Status,
+		Progress:    j.Progress,
+		Total:       j.Total,
+		Error:       j.Error,
+		Metadata:    j.Metadata,
+		CreatedAt:   j.CreatedAt,
+		StartedAt:   j.StartedAt,
+		CompletedAt: j.CompletedAt,
+	}
+}
+
 // GetJobStatus returns the current status of a job
 func (jm *JobManager) GetJobStatus(id string) (JobStatus, int, int, error) {
 	job := jm.GetJob(id)
 	if job == nil {
-		return "", 0, 0, fmt.Errorf("job not found")
+		return "", 0, 0, errors.New("job not found")
 	}
 
-	job.mu.RLock()
-	defer job.mu.RUnlock()
-	return job.Status, job.Progress, job.Total, nil
+	snap := job.snapshot()
+	return snap.Status, snap.Progress, snap.Total, nil
 }
 
 // GetJobResults returns the results of a completed job
 func (jm *JobManager) GetJobResults(id string) ([]string, error) {
 	job := jm.GetJob(id)
 	if job == nil {
-		return nil, fmt.Errorf("job not found")
+		return nil, errors.New("job not found")
 	}
 
 	job.mu.RLock()
@@ -453,7 +530,7 @@ func (jm *JobManager) GetJobResults(id string) ([]string, error) {
 func (jm *JobManager) CancelJob(id string) error {
 	job := jm.GetJob(id)
 	if job == nil {
-		return fmt.Errorf("job not found")
+		return errors.New("job not found")
 	}
 
 	job.mu.Lock()
@@ -463,12 +540,13 @@ func (jm *JobManager) CancelJob(id string) error {
 		return fmt.Errorf("cannot cancel job with status: %s", job.Status)
 	}
 
+	// Mark the job cancelled; the worker records the metric when it observes
+	// the cancellation (or a pending job is dequeued).
 	job.cancel()
 	job.Status = JobCancelled
 	now := time.Now()
 	job.CompletedAt = &now
 
-	jobsTotal.WithLabelValues("cancelled").Inc()
 	return nil
 }
 
@@ -522,54 +600,30 @@ func generateJobID() string {
 	return fmt.Sprintf("job-%d-%d", time.Now().Unix(), id)
 }
 
-// Global job manager
-var jobManager *JobManager
-
-// InitJobManager initializes the global job manager
-func InitJobManager(workerCount int) {
-	jobManager = NewJobManager(workerCount)
-	log.Infof("Job manager initialized with %d workers", workerCount)
-}
-
-// GetJobManager returns the global job manager
-func GetJobManager() *JobManager {
-	return jobManager
-}
-
 // HTTP Handlers for job API
 
 // createJobRequest handles POST /jobs
-func createJobRequest(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createJobRequest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Module  string   `json:"module"`
 		Queries []string `json:"queries"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		ErrorResponse(w, ErrDecodeRequest, err.Error())
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			ErrorResponse(w, ErrRequestTooLarge, "")
+		} else {
+			ErrorResponse(w, ErrDecodeRequest, err.Error())
+		}
 		return
 	}
 
-	if len(req.Queries) == 0 {
-		ErrorResponse(w, ErrEmptyQueries, "")
+	module, ok := s.validateLookupParams(w, req.Module, len(req.Queries))
+	if !ok {
 		return
 	}
-
-	if len(req.Queries) > GC.MaxQueriesPerReq {
-		ErrorResponse(w, ErrTooManyQueries, fmt.Sprintf("Maximum allowed: %d", GC.MaxQueriesPerReq))
-		return
-	}
-
-	if req.Module == "" {
-		req.Module = "A"
-	}
-
-	// Validate module
-	factory := zdns.GetLookup(req.Module)
-	if factory == nil {
-		ErrorResponse(w, ErrInvalidModule, req.Module)
-		return
-	}
+	req.Module = module
 
 	// Validate domains
 	for _, q := range req.Queries {
@@ -580,33 +634,37 @@ func createJobRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nameserver := ""
-	if len(GC.NameServers) > 0 {
-		nameserver = GC.NameServers[0]
+	if len(s.cfg.NameServers) > 0 {
+		nameserver = s.cfg.NameServers[0]
 	}
 
-	job := jobManager.SubmitJob(req.Module, req.Queries, nameserver)
+	job := s.jm.SubmitJob(req.Module, req.Queries, nameserver)
+
+	job.mu.RLock()
+	status := job.Status
+	job.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"job_id":     job.ID,
-		"status":     job.Status,
+		"status":     status,
 		"created_at": job.CreatedAt,
 	})
 }
 
 // getJobRequest handles GET /jobs/{job_id}
-func getJobRequest(w http.ResponseWriter, r *http.Request) {
+func (s *Server) getJobRequest(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	jobID := vars["job_id"]
 
-	job := jobManager.GetJob(jobID)
+	job := s.jm.GetJob(jobID)
 	if job == nil {
-		ErrorResponse(w, ErrorCode{Code: 2004, Message: "Job not found", HTTPStatus: http.StatusNotFound}, "")
+		ErrorResponse(w, ErrJobNotFound, "")
 		return
 	}
 
-	job.mu.RLock()
+	snap := job.snapshot()
 	response := struct {
 		ID          string                 `json:"id"`
 		Status      JobStatus              `json:"status"`
@@ -620,45 +678,39 @@ func getJobRequest(w http.ResponseWriter, r *http.Request) {
 		Metadata    map[string]interface{} `json:"metadata,omitempty"`
 	}{
 		ID:          job.ID,
-		Status:      job.Status,
+		Status:      snap.Status,
 		Module:      job.Module,
-		Total:       job.Total,
-		Progress:    job.Progress,
-		CreatedAt:   job.CreatedAt,
-		StartedAt:   job.StartedAt,
-		CompletedAt: job.CompletedAt,
-		Error:       job.Error,
-		Metadata:    job.Metadata,
+		Total:       snap.Total,
+		Progress:    snap.Progress,
+		CreatedAt:   snap.CreatedAt,
+		StartedAt:   snap.StartedAt,
+		CompletedAt: snap.CompletedAt,
+		Error:       snap.Error,
+		Metadata:    snap.Metadata,
 	}
-	job.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
 }
 
 // getJobResultsRequest handles GET /jobs/{job_id}/results
-func getJobResultsRequest(w http.ResponseWriter, r *http.Request) {
+func (s *Server) getJobResultsRequest(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	jobID := vars["job_id"]
 
-	results, err := jobManager.GetJobResults(jobID)
+	results, err := s.jm.GetJobResults(jobID)
 	if err != nil {
-		job := jobManager.GetJob(jobID)
+		job := s.jm.GetJob(jobID)
 		if job != nil {
-			job.mu.RLock()
-			status := job.Status
-			progress := job.Progress
-			total := job.Total
-			jobErr := job.Error
-			job.mu.RUnlock()
+			snap := job.snapshot()
 
-			if status == JobPending || status == JobRunning {
+			if snap.Status == JobPending || snap.Status == JobRunning {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusAccepted)
 				if err := json.NewEncoder(w).Encode(map[string]interface{}{
-					"status":   status,
-					"progress": progress,
-					"total":    total,
+					"status":   snap.Status,
+					"progress": snap.Progress,
+					"total":    snap.Total,
 					"message":  "Job is still processing",
 				}); err != nil {
 					log.Errorf("Error encoding JSON response: %v", err)
@@ -666,14 +718,14 @@ func getJobResultsRequest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			detail := string(status)
-			if jobErr != "" {
-				detail = jobErr
+			detail := string(snap.Status)
+			if snap.Error != "" {
+				detail = snap.Error
 			}
-			ErrorResponse(w, ErrorCode{Code: 2003, Message: "Job processing error", HTTPStatus: http.StatusBadRequest}, detail)
+			ErrorResponse(w, ErrJobProcessing, detail)
 			return
 		}
-		ErrorResponse(w, ErrorCode{Code: 2004, Message: "Job not found", HTTPStatus: http.StatusNotFound}, "")
+		ErrorResponse(w, ErrJobNotFound, "")
 		return
 	}
 
@@ -684,12 +736,12 @@ func getJobResultsRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // cancelJobRequest handles DELETE /jobs/{job_id}
-func cancelJobRequest(w http.ResponseWriter, r *http.Request) {
+func (s *Server) cancelJobRequest(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	jobID := vars["job_id"]
 
-	if err := jobManager.CancelJob(jobID); err != nil {
-		ErrorResponse(w, ErrorCode{Code: 2003, Message: err.Error(), HTTPStatus: http.StatusBadRequest}, "")
+	if err := s.jm.CancelJob(jobID); err != nil {
+		ErrorResponse(w, ErrJobProcessing, err.Error())
 		return
 	}
 
@@ -701,20 +753,19 @@ func cancelJobRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // listJobsRequest handles GET /jobs (admin/debug endpoint)
-func listJobsRequest(w http.ResponseWriter, r *http.Request) {
-	jobs := jobManager.ListJobs()
+func (s *Server) listJobsRequest(w http.ResponseWriter, r *http.Request) {
+	jobs := s.jm.ListJobs()
 
-	var response []map[string]interface{}
+	response := make([]map[string]interface{}, 0, len(jobs))
 	for _, job := range jobs {
-		job.mu.RLock()
+		snap := job.snapshot()
 		response = append(response, map[string]interface{}{
 			"id":       job.ID,
-			"status":   job.Status,
+			"status":   snap.Status,
 			"module":   job.Module,
-			"progress": job.Progress,
-			"total":    job.Total,
+			"progress": snap.Progress,
+			"total":    snap.Total,
 		})
-		job.mu.RUnlock()
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -73,10 +73,10 @@ func TestCORSMiddleware_Disabled(t *testing.T) {
 	})
 
 	config := CORSConfig{Enabled: false}
-	wrapped := CORSMiddleware(handler, config)
+	wrapped := CORSMiddleware(handler, config, false)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	wrapped.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
@@ -95,10 +95,10 @@ func TestCORSMiddleware_Enabled(t *testing.T) {
 		Methods: []string{"GET", "POST"},
 		Headers: []string{"Content-Type"},
 	}
-	wrapped := CORSMiddleware(handler, config)
+	wrapped := CORSMiddleware(handler, config, false)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Origin", "http://localhost")
 	wrapped.ServeHTTP(w, r)
 
