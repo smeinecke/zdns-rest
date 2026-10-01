@@ -1,6 +1,6 @@
 # Minimal runtime image around a prebuilt release binary.
 # The workflow places the binary at docker-dist/zdns-rest.
-FROM alpine:3.19
+FROM alpine:3.24
 
 RUN apk --no-cache add ca-certificates && \
     addgroup -S zdns && adduser -S -G zdns -H zdns
