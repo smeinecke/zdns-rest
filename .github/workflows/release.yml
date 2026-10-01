@@ -178,8 +178,10 @@ jobs:
         run: |
           set -euo pipefail
           IMAGE_REF="ghcr.io/${{ github.repository }}@${{ steps.build-image.outputs.digest }}"
-          docker pull "$IMAGE_REF"
-          docker create --name verify-image "$IMAGE_REF" >/dev/null
+          # The digest pins a single-arch image; pull it for its own
+          # platform or the host (amd64) gets "no matching manifest".
+          docker pull --platform "${{ matrix.platform }}" "$IMAGE_REF"
+          docker create --platform "${{ matrix.platform }}" --name verify-image "$IMAGE_REF" >/dev/null
           docker cp verify-image:/home/zdns/zdns-rest docker-dist/zdns-rest-from-image
           docker rm -f verify-image >/dev/null
           sha256sum docker-dist/zdns-rest-from-image
