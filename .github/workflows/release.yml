@@ -64,18 +64,23 @@ jobs:
 
   build-binaries:
     name: Build Binaries
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     needs: prepare
     strategy:
+      fail-fast: false
+      # zcrypto's ct/x509 has no darwin/arm64 system-roots implementation for
+      # CGO_ENABLED=0 builds, so darwin targets build natively on macOS runners
+      # with cgo (which also gives them real Keychain roots for DoH).
       matrix:
-        goos: [linux, windows, darwin]
-        goarch: ["386", amd64, arm64]
-        exclude:
-          - goarch: "386"
-            goos: darwin
-          - goarch: arm64
-            goos: windows
+        include:
+          - {goos: linux, goarch: "386", runner: ubuntu-latest, cgo: "0"}
+          - {goos: linux, goarch: amd64, runner: ubuntu-latest, cgo: "0"}
+          - {goos: linux, goarch: arm64, runner: ubuntu-latest, cgo: "0"}
+          - {goos: windows, goarch: "386", runner: ubuntu-latest, cgo: "0"}
+          - {goos: windows, goarch: amd64, runner: ubuntu-latest, cgo: "0"}
+          - {goos: darwin, goarch: amd64, runner: macos-latest, cgo: "1"}
+          - {goos: darwin, goarch: arm64, runner: macos-latest, cgo: "1"}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -89,7 +94,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
+          CGO_ENABLED: ${{ matrix.cgo }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           go build -trimpath -ldflags="-s -w -X main.buildVersion=${VERSION}" \
