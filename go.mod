@@ -1,6 +1,6 @@
 module github.com/smeinecke/zdns-rest
 
-go 1.26.0
+go 1.26.6
 
 require (
 	github.com/gorilla/mux v1.8.1
