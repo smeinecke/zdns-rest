@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Version is injected via ldflags (release builds pass --build-arg VERSION=x.y.z)
 ARG VERSION=dev

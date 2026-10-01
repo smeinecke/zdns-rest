@@ -1,6 +1,6 @@
 module github.com/smeinecke/zdns-rest
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/gorilla/mux v1.8.1
@@ -41,7 +41,7 @@ require (
 	github.com/weppos/publicsuffix-go v0.50.4-0.20260918082853-3c3d7dc4a0cb // indirect
 	github.com/zmap/go-dns-root-anchors v0.0.0-20250422052150-ed414f41f7c4 // indirect
 	github.com/zmap/go-iptree v0.0.0-20260427234317-6edabe974d8a // indirect
-	github.com/zmap/zcrypto v0.0.0-20260919232836-751f288b7287 // indirect
+	github.com/zmap/zcrypto v0.0.0-20260906175938-c60f6156e1ba // indirect
 	github.com/zmap/zflags v1.4.0-beta.1.0.20251126025438-ec78c6d2f8e9 // indirect
 	github.com/zmap/zgrab2 v1.0.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
