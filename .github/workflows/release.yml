@@ -122,6 +122,7 @@ jobs:
     timeout-minutes: 30
     needs: [prepare, build-binaries]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - goarch: amd64
@@ -167,8 +168,10 @@ jobs:
           context: .
           file: ./Dockerfile.release
           platforms: ${{ matrix.platform }}
-          # Push by digest only; the manifest job tags the multi-arch image
-          outputs: type=image,push-by-digest=true,push=true
+          # Push by digest only; the manifest job tags the multi-arch image.
+          # name-canonical produces ghcr.io/<repo>@sha256:... refs so no
+          # mutable per-arch tag is created.
+          outputs: type=image,"name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true"
 
       - name: Verify image contains released binary
         shell: bash
