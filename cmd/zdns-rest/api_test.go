@@ -20,7 +20,7 @@ func TestHealthRequest(t *testing.T) {
 	healthRequest(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("healthRequest() status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
@@ -48,7 +48,7 @@ func TestReadyRequest(t *testing.T) {
 	readyRequest(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("readyRequest() status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
@@ -104,7 +104,7 @@ func TestErrorResponse(t *testing.T) {
 			ErrorResponse(w, tt.errCode, tt.detail)
 
 			resp := w.Result()
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != tt.wantStatus {
 				t.Errorf("ErrorResponse() status = %d, want %d", resp.StatusCode, tt.wantStatus)
 			}
@@ -147,7 +147,7 @@ func TestAPIResult(t *testing.T) {
 			APIResult(w, tt.code, tt.message)
 
 			resp := w.Result()
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != tt.wantStatus {
 				t.Errorf("APIResult() status = %d, want %d", resp.StatusCode, tt.wantStatus)
 			}
@@ -171,7 +171,7 @@ func TestPingRequest(t *testing.T) {
 	pingRequest(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("pingRequest() status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
@@ -189,7 +189,7 @@ func TestNotFound(t *testing.T) {
 	notFound(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("notFound() status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -264,7 +264,7 @@ func TestRunModule_InvalidJSON(t *testing.T) {
 	newTestServer().runModule(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() with invalid JSON status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -282,7 +282,7 @@ func TestRunModule_MissingQueries(t *testing.T) {
 	newTestServer().runModule(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() with missing queries status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -300,7 +300,7 @@ func TestRunModule_JSONContentTypeWithCharset(t *testing.T) {
 	newTestServer().runModule(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("runModule() status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -387,7 +387,7 @@ func TestRunModule_FormEncoded(t *testing.T) {
 	newTestServer().runModule(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// Should get error due to invalid module or factory initialization failure
 	if resp.StatusCode == http.StatusOK {
 		t.Log("runModule with form-encoded succeeded (may be due to DNS available)")
@@ -406,7 +406,7 @@ func TestRunModule_InvalidModule(t *testing.T) {
 	newTestServer().runModule(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() with invalid module status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -430,7 +430,7 @@ func TestRunModule_DefaultModule(t *testing.T) {
 	newTestServer().runModule(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// Should use default module "A" and fail due to factory initialization
 	if resp.StatusCode == http.StatusOK {
 		t.Log("runModule with default module succeeded")
@@ -455,7 +455,7 @@ func TestRunModule_URLModule(t *testing.T) {
 	newTestServer().runModule(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusOK {
 		t.Log("runModule with URL module succeeded")
 	}
@@ -474,7 +474,7 @@ func TestRunModule_ReadBodyError(t *testing.T) {
 	newTestServer().runModule(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() with read error status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -505,7 +505,7 @@ func TestRunModule_EmptyModuleDefault(t *testing.T) {
 	newTestServer().runModule(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// Should use default "A" and likely fail due to factory init
 	t.Logf("Response status: %d", resp.StatusCode)
 }
@@ -671,7 +671,7 @@ func TestRunModule_TooManyQueries(t *testing.T) {
 	newTestServer().runModule(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
@@ -689,7 +689,7 @@ func TestRunModule_InvalidDomain(t *testing.T) {
 	newTestServer().runModule(w, r)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("runModule() status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}

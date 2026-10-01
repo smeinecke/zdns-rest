@@ -147,7 +147,7 @@ func prepareConfig() {
 	defer GCMu.Unlock()
 
 	if GC.LogFilePath != "" {
-		f, err := os.OpenFile(GC.LogFilePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+		f, err := os.OpenFile(GC.LogFilePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 		if err != nil {
 			//nolint:gocritic // exits the process; deferred GCMu.Unlock is moot
 			log.Fatalf("Unable to open log file (%s): %s", GC.LogFilePath, err.Error())
@@ -242,6 +242,7 @@ func prepareConfig() {
 		var ns []string
 		if (AC.Servers_string)[0] == '@' {
 			filepath := (AC.Servers_string)[1:]
+			//nolint:gosec // G304: nameserver list path is operator-supplied config
 			f, err := os.ReadFile(filepath)
 			if err != nil {
 				log.Fatalf("Unable to read file (%s): %s", filepath, err.Error())
@@ -466,6 +467,7 @@ func BindFlags(cmd *cobra.Command, v *viper.Viper, envPrefix string) {
 
 // loadKeyValueConfig reads a simple key=value config file and loads into viper
 func loadKeyValueConfig(path string) error {
+	//nolint:gosec // G304: config path is operator-supplied via --config
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err

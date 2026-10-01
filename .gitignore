@@ -14,4 +14,7 @@
 # Dependency directories (remove the comment below to include it)
 # vendor/
 .vscode/
+
+# built binary (Makefile builds into repo root, go build into cmd/)
 /zdns-rest
+cmd/zdns-rest/zdns-rest

@@ -162,7 +162,7 @@ func TestIntegration_API(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Request failed: %v", err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			if resp.StatusCode != tt.wantStatus {
 				t.Errorf("Got status %d, want %d", resp.StatusCode, tt.wantStatus)
@@ -193,7 +193,7 @@ func TestIntegration_ALookup(t *testing.T) {
 		t.Skipf("DNS lookup test skipped: %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	var result map[string]interface{}
@@ -221,7 +221,7 @@ func TestIntegration_HealthEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Health request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Health status = %d, want %d", resp.StatusCode, http.StatusOK)
@@ -243,7 +243,7 @@ func TestIntegration_HealthEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ready request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Ready status = %d, want %d", resp.StatusCode, http.StatusOK)
@@ -262,7 +262,7 @@ func TestIntegration_HealthEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Metrics request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Metrics status = %d, want %d", resp.StatusCode, http.StatusOK)
@@ -278,7 +278,7 @@ func TestIntegration_HealthEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ping request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Ping status = %d, want %d", resp.StatusCode, http.StatusOK)
@@ -305,7 +305,7 @@ func TestIntegration_AuthMiddleware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request without auth failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("No auth status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
@@ -317,7 +317,7 @@ func TestIntegration_AuthMiddleware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request with valid auth failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	// Should not be 401 (may be other error since it's GET /job not POST)
 	if resp.StatusCode == http.StatusUnauthorized {
 		t.Error("Valid auth returned 401, expected success")
@@ -330,7 +330,7 @@ func TestIntegration_AuthMiddleware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Request with invalid auth failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("Invalid auth status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
@@ -364,7 +364,7 @@ func TestIntegration_Cache(t *testing.T) {
 		t.Skipf("DNS lookup test skipped: %v", err)
 		return
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Skipf("DNS request failed with status: %d", resp.StatusCode)
@@ -377,7 +377,7 @@ func TestIntegration_Cache(t *testing.T) {
 		t.Fatalf("Metrics request failed: %v", err)
 	}
 	metricsBody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// Should contain cache metrics
 	if !strings.Contains(string(metricsBody), "zdns_cache_") {
@@ -390,7 +390,7 @@ func TestIntegration_Cache(t *testing.T) {
 		t.Skipf("Second DNS lookup test skipped: %v", err)
 		return
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	t.Log("Cache integration test completed successfully")
 
@@ -416,7 +416,7 @@ func TestIntegration_AsyncJobs(t *testing.T) {
 
 	if resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("Expected 202 Accepted, got %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -424,7 +424,7 @@ func TestIntegration_AsyncJobs(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&jobResp); err != nil {
 		t.Fatalf("Failed to decode job response: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	jobID, ok := jobResp["job_id"].(string)
 	if !ok || jobID == "" {
@@ -449,10 +449,10 @@ func TestIntegration_AsyncJobs(t *testing.T) {
 
 		var statusResp map[string]interface{}
 		if err := json.NewDecoder(resp.Body).Decode(&statusResp); err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Fatalf("Failed to decode status response: %v", err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		jobStatus, _ = statusResp["status"].(string)
 		progress := 0
@@ -485,18 +485,18 @@ func TestIntegration_AsyncJobs(t *testing.T) {
 
 	if resp.StatusCode == http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if len(body) == 0 {
 			t.Log("Job completed but no results returned")
 		} else {
 			t.Logf("Job results received: %d bytes", len(body))
 		}
 	} else if resp.StatusCode == http.StatusAccepted {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Log("Job still processing (202 returned)")
 	} else {
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Logf("Unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -508,15 +508,15 @@ func TestIntegration_AsyncJobs(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Logf("List jobs returned %d: %s", resp.StatusCode, string(body))
 	} else {
 		var jobsList []map[string]interface{}
 		if err := json.NewDecoder(resp.Body).Decode(&jobsList); err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Logf("Failed to decode jobs list: %v", err)
 		} else {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Logf("Found %d jobs", len(jobsList))
 		}
 	}
@@ -606,7 +606,7 @@ func TestIntegration_CORS(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Request failed: %v", err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			if tt.method == "OPTIONS" {
 				if resp.StatusCode != tt.wantStatus {
@@ -654,7 +654,7 @@ func TestIntegration_JobLookupEndpoint(t *testing.T) {
 		t.Skipf("DNS lookup test skipped: %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Skipf("DNS request failed with status: %d", resp.StatusCode)
@@ -712,7 +712,7 @@ func TestIntegration_RateLimiting(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Request %d failed: %v", i+1, err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("Request %d: status = %d, want %d", i+1, resp.StatusCode, http.StatusOK)
@@ -724,7 +724,7 @@ func TestIntegration_RateLimiting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Rate limit request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Errorf("Rate limit status = %d, want %d", resp.StatusCode, http.StatusTooManyRequests)
@@ -764,10 +764,10 @@ func TestIntegration_JobCancellation(t *testing.T) {
 
 	var jobResp map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&jobResp); err != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("Failed to decode job response: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	jobID, ok := jobResp["job_id"].(string)
 	if !ok || jobID == "" {
@@ -785,10 +785,10 @@ func TestIntegration_JobCancellation(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("Cancel job returned %d: %s", resp.StatusCode, string(body))
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// Verify job is cancelled
 	resp, err = client.Get(baseURL + "/jobs/" + jobID)
@@ -798,10 +798,10 @@ func TestIntegration_JobCancellation(t *testing.T) {
 
 	var statusResp map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&statusResp); err != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("Failed to decode status response: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	status, _ := statusResp["status"].(string)
 	if status != "cancelled" {
@@ -885,7 +885,7 @@ func TestIntegration_JobsErrorCases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Request failed: %v", err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			if resp.StatusCode != tt.wantStatus {
 				t.Errorf("Got status %d, want %d", resp.StatusCode, tt.wantStatus)
@@ -928,7 +928,7 @@ rate-limit=false`, port)
 	if err != nil {
 		t.Fatalf("Server did not start on port %d: %v", port, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Got status %d, want %d", resp.StatusCode, http.StatusOK)
@@ -981,7 +981,7 @@ threads: 500`, port)
 	if err != nil {
 		t.Fatalf("Server did not start on port %d: %v", port, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Got status %d, want %d", resp.StatusCode, http.StatusOK)
@@ -1042,7 +1042,7 @@ api-key=test-secret-key-12345`, port)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("Without API key: got status %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// Test request with correct API key should succeed
 	req, _ := http.NewRequest("GET", baseURL+"/jobs", nil)
@@ -1051,7 +1051,7 @@ api-key=test-secret-key-12345`, port)
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("With API key: got status %d, want %d", resp.StatusCode, http.StatusOK)
