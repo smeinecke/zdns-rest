@@ -235,7 +235,7 @@ func prepareConfig() {
 			log.Fatal("Unable to find default IP address: ", err)
 		}
 		GC.LocalAddrs = append(GC.LocalAddrs, conn.LocalAddr().(*net.UDPAddr).IP)
-		conn.Close()
+		_ = conn.Close()
 	}
 	if AC.NanoSeconds {
 		GC.TimeFormat = time.RFC3339Nano

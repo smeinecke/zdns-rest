@@ -670,7 +670,7 @@ func TestLimitBodySize(t *testing.T) {
 	handler := LimitBodySize(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Read the body to trigger the limit check
 		body, err := io.ReadAll(r.Body)
-		r.Body.Close()
+		_ = r.Body.Close()
 		if err != nil {
 			// MaxBytesReader returns an error for oversized bodies
 			if strings.Contains(err.Error(), "too large") || strings.Contains(err.Error(), "http: request body too large") {
