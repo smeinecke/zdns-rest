@@ -82,11 +82,11 @@ jobs:
           - {goos: darwin, goarch: amd64, runner: macos-latest, cgo: "1"}
           - {goos: darwin, goarch: arm64, runner: macos-latest, cgo: "1"}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.checkout_ref }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -105,12 +105,12 @@ jobs:
         run: ./zdns-rest-linux-amd64 --version | grep -F "${{ needs.prepare.outputs.version }}"
 
       - name: Attest binary provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: zdns-rest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zdns-rest-${{ matrix.goos }}-${{ matrix.goarch }}
           path: zdns-rest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
@@ -130,18 +130,18 @@ jobs:
           - goarch: arm64
             platform: linux/arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.checkout_ref }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Download matching binary artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: zdns-rest-linux-${{ matrix.goarch }}
           path: docker-dist/
@@ -155,7 +155,7 @@ jobs:
           sha256sum docker-dist/zdns-rest | tee docker-dist/sha256.txt
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -163,7 +163,7 @@ jobs:
 
       - name: Build and push architecture image
         id: build-image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile.release
@@ -188,7 +188,7 @@ jobs:
           cmp -s docker-dist/zdns-rest docker-dist/zdns-rest-from-image
 
       - name: Attest image provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.build-image.outputs.digest }}
@@ -202,7 +202,7 @@ jobs:
           touch "image-digests/${digest#sha256:}"
 
       - name: Upload image digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: image-digests-${{ matrix.goarch }}
           path: image-digests/*
@@ -233,14 +233,14 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Download image digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: image-digests/
           pattern: image-digests-*
           merge-multiple: true
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -267,7 +267,7 @@ jobs:
     needs: [prepare, build-binaries]
     steps:
       - name: Download all binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts/
           pattern: zdns-rest-*
